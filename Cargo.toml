@@ -23,13 +23,32 @@ chrono = { version = "0.4", default-features = false, features = [
     "serde",
     "clock",
 ] }
-datafusion = "54"
-datafusion-common = "54"
-datafusion-execution = "54"
-datafusion-expr = "54"
-datafusion-functions = { version = "54", features = ["crypto_expressions"] }
-datafusion-functions-aggregate = "54"
-datafusion-sql = "54"
+#Official Releases
+#datafusion = "54"
+#datafusion-common = "54"
+#datafusion-execution = "54"
+#datafusion-expr = "54"
+#datafusion-functions = { version = "54", features = ["crypto_expressions"] }
+#datafusion-functions-aggregate = "54"
+#datafusion-sql = "54"
+
+#Fork (andts/datafusion, rev filled in once the fork is pushed/merged)
+#datafusion = { version = "54", features = ["backtrace", ], git = "https://github.com/andts/datafusion.git", rev = "TBD" }
+#datafusion-common = { version = "54", git = "https://github.com/andts/datafusion.git", rev = "TBD" }
+#datafusion-execution = { version = "54", git = "https://github.com/andts/datafusion.git", rev = "TBD" }
+#datafusion-expr = { version = "54", git = "https://github.com/andts/datafusion.git", rev = "TBD" }
+#datafusion-functions = { version = "54", features = ["crypto_expressions"], git = "https://github.com/andts/datafusion.git", rev = "TBD" }
+#datafusion-functions-aggregate = { version = "54", git = "https://github.com/andts/datafusion.git", rev = "TBD" }
+#datafusion-sql = { version = "54", git = "https://github.com/andts/datafusion.git", rev = "TBD" }
+
+#Local Changes (active for local development against the andts-datafusion checkout)
+datafusion = { version = "54", features = ["backtrace", ], path = "../andts-datafusion/datafusion/core" }
+datafusion-common = { version = "54", path = "../andts-datafusion/datafusion/common"  }
+datafusion-execution = { version = "54", path = "../andts-datafusion/datafusion/execution" }
+datafusion-expr = { version = "54", path = "../andts-datafusion/datafusion/expr" }
+datafusion-functions = { version = "54", features = ["crypto_expressions"], path = "../andts-datafusion/datafusion/functions" }
+datafusion-functions-aggregate = { version = "54", path = "../andts-datafusion/datafusion/functions-aggregate" }
+datafusion-sql = { version = "54", path = "../andts-datafusion/datafusion/sql" }
 derive-getters = "0.5.0"
 derive_builder = "0.20"
 futures = "0.3.31"
