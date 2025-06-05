@@ -24,13 +24,32 @@ chrono = { version = "0.4", default-features = false, features = [
     "clock",
 ] }
 crc32fast = "1.4"
-datafusion = "55"
-datafusion-common = "55"
-datafusion-execution = "55"
-datafusion-expr = "55"
-datafusion-functions = { version = "55", features = ["crypto_expressions"] }
-datafusion-functions-aggregate = "55"
-datafusion-sql = "55"
+#Official Releases
+#datafusion = "55"
+#datafusion-common = "55"
+#datafusion-execution = "55"
+#datafusion-expr = "55"
+#datafusion-functions = { version = "55", features = ["crypto_expressions"] }
+#datafusion-functions-aggregate = "55"
+#datafusion-sql = "55"
+
+#Fork (andts/datafusion, rebased onto 55.1.0)
+datafusion = { version = "55", features = ["backtrace", ], git = "https://github.com/andts/datafusion.git", rev = "fb722c227a3e5c22af3e140a418977c3df9c853d" }
+datafusion-common = { version = "55", git = "https://github.com/andts/datafusion.git", rev = "fb722c227a3e5c22af3e140a418977c3df9c853d" }
+datafusion-execution = { version = "55", git = "https://github.com/andts/datafusion.git", rev = "fb722c227a3e5c22af3e140a418977c3df9c853d" }
+datafusion-expr = { version = "55", git = "https://github.com/andts/datafusion.git", rev = "fb722c227a3e5c22af3e140a418977c3df9c853d" }
+datafusion-functions = { version = "55", features = ["crypto_expressions"], git = "https://github.com/andts/datafusion.git", rev = "fb722c227a3e5c22af3e140a418977c3df9c853d" }
+datafusion-functions-aggregate = { version = "55", git = "https://github.com/andts/datafusion.git", rev = "fb722c227a3e5c22af3e140a418977c3df9c853d" }
+datafusion-sql = { version = "55", git = "https://github.com/andts/datafusion.git", rev = "fb722c227a3e5c22af3e140a418977c3df9c853d" }
+
+#Local Changes (for local development against the andts-datafusion checkout)
+#datafusion = { version = "55", features = ["backtrace", ], path = "../andts-datafusion/datafusion/core" }
+#datafusion-common = { version = "55", path = "../andts-datafusion/datafusion/common"  }
+#datafusion-execution = { version = "55", path = "../andts-datafusion/datafusion/execution" }
+#datafusion-expr = { version = "55", path = "../andts-datafusion/datafusion/expr" }
+#datafusion-functions = { version = "55", features = ["crypto_expressions"], path = "../andts-datafusion/datafusion/functions" }
+#datafusion-functions-aggregate = { version = "55", path = "../andts-datafusion/datafusion/functions-aggregate" }
+#datafusion-sql = { version = "55", path = "../andts-datafusion/datafusion/sql" }
 derive-getters = "0.5.0"
 derive_builder = "0.20"
 futures = "0.3.31"

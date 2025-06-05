@@ -182,7 +182,7 @@ impl CreateTableBuilder {
         let create = self.create()?;
 
         // Register table in catalog
-        catalog.clone().create_table(identifier, create).await
+        catalog.create_table(identifier, create).await
     }
 }
 
