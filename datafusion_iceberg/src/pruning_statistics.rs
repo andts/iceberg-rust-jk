@@ -24,7 +24,7 @@ use datafusion::{
         tree_node::{Transformed, TreeNode},
         DataFusionError,
     },
-    physical_optimizer::pruning::PruningStatistics,
+    common::pruning::PruningStatistics,
     prelude::Column,
     scalar::ScalarValue,
 };
@@ -103,9 +103,11 @@ impl PruningStatistics for PruneManifests<'_, '_> {
         });
         any_iter_to_array(max_values, &(&data_type).try_into().ok()?).ok()
     }
+    
     fn num_containers(&self) -> usize {
         self.files.len()
     }
+    
     fn null_counts(&self, column: &Column) -> Option<ArrayRef> {
         let (index, _) = self
             .partition_fields

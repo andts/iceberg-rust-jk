@@ -23,13 +23,33 @@ chrono = { version = "0.4", default-features = false, features = [
     "serde",
     "clock",
 ] }
-datafusion = "52"
-datafusion-common = "52"
-datafusion-execution = "52"
-datafusion-expr = "52"
-datafusion-functions = { version = "52", features = ["crypto_expressions"] }
-datafusion-functions-aggregate = "52"
-datafusion-sql = "52"
+
+#Official Releases
+#datafusion = "52"
+#datafusion-common = "52"
+#datafusion-execution = "52"
+#datafusion-expr = "52"
+#datafusion-functions = { version = "52", features = ["crypto_expressions"] }
+#datafusion-functions-aggregate = "52"
+#datafusion-sql = "52"
+
+#Fork
+datafusion = { version = "48", features = ["backtrace", ], git = "https://github.com/andts/datafusion.git", rev = "75c9c68" }
+datafusion-common = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "75c9c68" }
+datafusion-execution = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "75c9c68" }
+datafusion-expr = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "75c9c68" }
+datafusion-functions = { version = "48", features = ["crypto_expressions"], git = "https://github.com/andts/datafusion.git", rev = "75c9c68" }
+datafusion-functions-aggregate = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "75c9c68" }
+datafusion-sql = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "75c9c68" }
+
+#Local Changes
+#datafusion = { version = "48", features = ["backtrace", ], path = "../andts-datafusion/datafusion/core" }
+#datafusion-common = { version = "48", path = "../andts-datafusion/datafusion/common"  }
+#datafusion-execution = { version = "48", path = "../andts-datafusion/datafusion/execution" }
+#datafusion-expr = { version = "48", path = "../andts-datafusion/datafusion/expr" }
+#datafusion-functions = { version = "48", features = ["crypto_expressions"], path = "../andts-datafusion/datafusion/functions" }
+#datafusion-functions-aggregate = { version = "48", path = "../andts-datafusion/datafusion/functions-aggregate" }
+#datafusion-sql = { version = "48", path = "../andts-datafusion/datafusion/sql" }
 derive-getters = "0.5.0"
 derive_builder = "0.20"
 futures = "0.3.31"
