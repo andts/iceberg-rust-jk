@@ -353,7 +353,17 @@ impl Catalog for RestCatalog {
                     .await
                     .map_err(|_| Error::CatalogNotFound)?;
 
-                    let object_store = self.get_object_store(&response)?;
+                    let object_store = object_store_from_response(&response, &self.default_object_store_builder)?
+                        .ok_or(Error::NotFound("Object store credentials".to_string()))
+                        .or_else(|_| {
+                            self.default_object_store_builder
+                                .as_ref()
+                                .ok_or(Error::NotFound("Default object store".to_string()))
+                                .and_then(|x| {
+                                    let bucket = Bucket::from_path(&response.metadata.location)?;
+                                    x.build(bucket)
+                                })
+                        })?;
 
                     self.cache
                         .write()
@@ -397,12 +407,17 @@ impl Catalog for RestCatalog {
         .map_err(Into::<Error>::into)
         .await?;
 
-        let object_store = self.get_object_store(&response)?;
-
-        self.cache
-            .write()
-            .unwrap()
-            .insert(identifier.clone(), object_store.clone());
+        let object_store = object_store_from_response(&response, &self.default_object_store_builder)?
+            .ok_or(Error::NotFound("Object store credentials".to_string()))
+            .or_else(|_| {
+                self.default_object_store_builder
+                    .as_ref()
+                    .ok_or(Error::NotFound("Default object store".to_string()))
+                    .and_then(|x| {
+                        let bucket = Bucket::from_path(&response.metadata.location)?;
+                        x.build(bucket)
+                    })
+            })?;
 
         self.cache
             .write()
@@ -579,7 +594,17 @@ impl Catalog for RestCatalog {
         )
         .map_err(Into::<Error>::into)
         .await?;
-        let object_store = self.get_object_store(&response)?;
+        let object_store = object_store_from_response(&response, &self.default_object_store_builder)?
+            .ok_or(Error::NotFound("Object store credentials".to_string()))
+            .or_else(|_| {
+                self.default_object_store_builder
+                    .as_ref()
+                    .ok_or(Error::NotFound("Default object store".to_string()))
+                    .and_then(|x| {
+                        let bucket = Bucket::from_path(&response.metadata.location)?;
+                        x.build(bucket)
+                    })
+            })?;
 
         Table::new(identifier.clone(), self, object_store, response.metadata).await
     }
@@ -674,6 +699,7 @@ impl CatalogList for RestNoPrefixCatalogList {
 
 fn object_store_from_response(
     response: &models::LoadTableResult,
+    default_object_store_builder: &Option<ObjectStoreBuilder>,
 ) -> Result<Option<Arc<dyn ObjectStore>>, Error> {
     let config = match (&response.storage_credentials, &response.config) {
         (Some(credentials), Some(config)) => {
@@ -689,7 +715,7 @@ fn object_store_from_response(
     };
 
     let url = Url::parse(&response.metadata.location)?;
-    Ok(Some(object_store_from_config(url, config)?))
+    Ok(Some(object_store_from_config(url, config, default_object_store_builder)?))
 }
 
 #[cfg(test)]
