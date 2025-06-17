@@ -411,11 +411,6 @@ impl Catalog for RestCatalog {
             .unwrap()
             .insert(identifier.clone(), object_store.clone());
 
-        self.cache
-            .write()
-            .unwrap()
-            .insert(identifier.clone(), object_store.clone());
-
         Table::new(identifier.clone(), self, object_store, response.metadata).await
     }
     /// Update a table by atomically changing the pointer to the metadata file
@@ -673,6 +668,7 @@ fn access_delegation_headers(value: Option<&str>) -> HashMap<String, String> {
 
 fn object_store_from_response(
     response: &models::LoadTableResult,
+    default_object_store_builder: &Option<ObjectStoreBuilder>,
 ) -> Result<Option<Arc<dyn ObjectStore>>, Error> {
     let config = match (&response.storage_credentials, &response.config) {
         (Some(credentials), Some(config)) if !credentials.is_empty() => {
@@ -688,7 +684,7 @@ fn object_store_from_response(
     };
 
     let url = Url::parse(&response.metadata.location)?;
-    Ok(Some(object_store_from_config(url, config)?))
+    Ok(Some(object_store_from_config(url, config, default_object_store_builder)?))
 }
 
 #[cfg(test)]
