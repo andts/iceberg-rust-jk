@@ -34,17 +34,17 @@ chrono = { version = "0.4", default-features = false, features = [
 #datafusion-sql = "52"
 
 #Fork
-datafusion = { version = "48", features = ["backtrace", ], git = "https://github.com/andts/datafusion.git", rev = "e4eb528" }
-datafusion-common = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "e4eb528" }
-datafusion-execution = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "e4eb528" }
-datafusion-expr = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "e4eb528" }
-datafusion-functions = { version = "48", features = ["crypto_expressions"], git = "https://github.com/andts/datafusion.git", rev = "e4eb528" }
-datafusion-functions-aggregate = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "e4eb528" }
-datafusion-sql = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "e4eb528" }
+datafusion = { version = "48", features = ["backtrace", ], git = "https://github.com/andts/datafusion.git", rev = "c209ad7" }
+datafusion-common = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "c209ad7" }
+datafusion-execution = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "c209ad7" }
+datafusion-expr = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "c209ad7" }
+datafusion-functions = { version = "48", features = ["crypto_expressions"], git = "https://github.com/andts/datafusion.git", rev = "c209ad7" }
+datafusion-functions-aggregate = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "c209ad7" }
+datafusion-sql = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "c209ad7" }
 
 #Local Changes
 #datafusion = { version = "48", features = ["backtrace", ], path = "../andts-datafusion/datafusion/core" }
-#datafusion-common = { version = "48", path = "../andts-datafusion/datafusion/common"  }
+#datafusion-common = { version = "48", path = "../andts-datafusion/datafusion/common" }
 #datafusion-execution = { version = "48", path = "../andts-datafusion/datafusion/execution" }
 #datafusion-expr = { version = "48", path = "../andts-datafusion/datafusion/expr" }
 #datafusion-functions = { version = "48", features = ["crypto_expressions"], path = "../andts-datafusion/datafusion/functions" }

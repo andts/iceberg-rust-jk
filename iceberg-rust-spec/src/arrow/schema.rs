@@ -95,7 +95,7 @@ impl TryFrom<&Type> for DataType {
                     TimeUnit::Microsecond,
                     Some(Arc::from("UTC")),
                 )),
-                PrimitiveType::String => Ok(DataType::Utf8),
+                PrimitiveType::String => Ok(DataType::Utf8View),
                 PrimitiveType::Uuid => Ok(DataType::Utf8),
                 PrimitiveType::Fixed(len) => Ok(DataType::FixedSizeBinary(*len as i32)),
                 PrimitiveType::Binary => Ok(DataType::Binary),
