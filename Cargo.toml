@@ -34,13 +34,13 @@ chrono = { version = "0.4", default-features = false, features = [
 #datafusion-sql = "52"
 
 #Fork
-datafusion = { version = "48", features = ["backtrace", ], git = "https://github.com/andts/datafusion.git", rev = "c209ad7" }
-datafusion-common = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "c209ad7" }
-datafusion-execution = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "c209ad7" }
-datafusion-expr = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "c209ad7" }
-datafusion-functions = { version = "48", features = ["crypto_expressions"], git = "https://github.com/andts/datafusion.git", rev = "c209ad7" }
-datafusion-functions-aggregate = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "c209ad7" }
-datafusion-sql = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "c209ad7" }
+datafusion = { version = "48", features = ["backtrace", ], git = "https://github.com/andts/datafusion.git", rev = "2c61edd" }
+datafusion-common = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "2c61edd" }
+datafusion-execution = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "2c61edd" }
+datafusion-expr = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "2c61edd" }
+datafusion-functions = { version = "48", features = ["crypto_expressions"], git = "https://github.com/andts/datafusion.git", rev = "2c61edd" }
+datafusion-functions-aggregate = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "2c61edd" }
+datafusion-sql = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "2c61edd" }
 
 #Local Changes
 #datafusion = { version = "48", features = ["backtrace", ], path = "../andts-datafusion/datafusion/core" }
