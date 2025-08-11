@@ -34,22 +34,22 @@ chrono = { version = "0.4", default-features = false, features = [
 #datafusion-sql = "52"
 
 #Fork
-datafusion = { version = "48", features = ["backtrace", ], git = "https://github.com/andts/datafusion.git", rev = "2c61edd" }
-datafusion-common = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "2c61edd" }
-datafusion-execution = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "2c61edd" }
-datafusion-expr = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "2c61edd" }
-datafusion-functions = { version = "48", features = ["crypto_expressions"], git = "https://github.com/andts/datafusion.git", rev = "2c61edd" }
-datafusion-functions-aggregate = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "2c61edd" }
-datafusion-sql = { version = "48", git = "https://github.com/andts/datafusion.git", rev = "2c61edd" }
+datafusion = { version = "49", features = ["backtrace", ], git = "https://github.com/andts/datafusion.git", rev = "aa4c732" }
+datafusion-common = { version = "49", git = "https://github.com/andts/datafusion.git", rev = "aa4c732" }
+datafusion-execution = { version = "49", git = "https://github.com/andts/datafusion.git", rev = "aa4c732" }
+datafusion-expr = { version = "49", git = "https://github.com/andts/datafusion.git", rev = "aa4c732" }
+datafusion-functions = { version = "49", features = ["crypto_expressions"], git = "https://github.com/andts/datafusion.git", rev = "aa4c732" }
+datafusion-functions-aggregate = { version = "49", git = "https://github.com/andts/datafusion.git", rev = "aa4c732" }
+datafusion-sql = { version = "49", git = "https://github.com/andts/datafusion.git", rev = "aa4c732" }
 
 #Local Changes
-#datafusion = { version = "48", features = ["backtrace", ], path = "../andts-datafusion/datafusion/core" }
-#datafusion-common = { version = "48", path = "../andts-datafusion/datafusion/common" }
-#datafusion-execution = { version = "48", path = "../andts-datafusion/datafusion/execution" }
-#datafusion-expr = { version = "48", path = "../andts-datafusion/datafusion/expr" }
-#datafusion-functions = { version = "48", features = ["crypto_expressions"], path = "../andts-datafusion/datafusion/functions" }
-#datafusion-functions-aggregate = { version = "48", path = "../andts-datafusion/datafusion/functions-aggregate" }
-#datafusion-sql = { version = "48", path = "../andts-datafusion/datafusion/sql" }
+#datafusion = { version = "49", features = ["backtrace", ], path = "../andts-datafusion/datafusion/core" }
+#datafusion-common = { version = "49", path = "../andts-datafusion/datafusion/common" }
+#datafusion-execution = { version = "49", path = "../andts-datafusion/datafusion/execution" }
+#datafusion-expr = { version = "49", path = "../andts-datafusion/datafusion/expr" }
+#datafusion-functions = { version = "49", features = ["crypto_expressions"], path = "../andts-datafusion/datafusion/functions" }
+#datafusion-functions-aggregate = { version = "49", path = "../andts-datafusion/datafusion/functions-aggregate" }
+#datafusion-sql = { version = "49", path = "../andts-datafusion/datafusion/sql" }
 derive-getters = "0.5.0"
 derive_builder = "0.20"
 futures = "0.3.31"
