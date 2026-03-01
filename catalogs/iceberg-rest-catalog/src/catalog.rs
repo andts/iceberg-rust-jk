@@ -93,7 +93,7 @@ impl RestCatalog {
                 });
         }
 
-        object_store_from_response(response)?
+        object_store_from_response(response, &self.default_object_store_builder)?
             .ok_or(Error::NotFound("Object store credentials".to_string()))
             .or_else(|_| {
                 self.default_object_store_builder

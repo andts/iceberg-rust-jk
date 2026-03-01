@@ -149,10 +149,28 @@ impl TryFrom<&DataType> for Type {
             DataType::Int8 | DataType::Int16 | DataType::Int32 => {
                 Ok(Type::Primitive(PrimitiveType::Int))
             }
+            DataType::UInt8 | DataType::UInt16 => {
+                Ok(Type::Primitive(PrimitiveType::Int))
+            }
+            DataType::UInt32 => {
+                Ok(Type::Primitive(PrimitiveType::Long))
+            }
             DataType::Int64 => Ok(Type::Primitive(PrimitiveType::Long)),
             DataType::Float32 => Ok(Type::Primitive(PrimitiveType::Float)),
             DataType::Float64 => Ok(Type::Primitive(PrimitiveType::Double)),
+            DataType::Decimal32(precision, scale) => Ok(Type::Primitive(PrimitiveType::Decimal {
+                precision: *precision as u32,
+                scale: *scale as u32,
+            })),
+            DataType::Decimal64(precision, scale) => Ok(Type::Primitive(PrimitiveType::Decimal {
+                precision: *precision as u32,
+                scale: *scale as u32,
+            })),
             DataType::Decimal128(precision, scale) => Ok(Type::Primitive(PrimitiveType::Decimal {
+                precision: *precision as u32,
+                scale: *scale as u32,
+            })),
+            DataType::Decimal256(precision, scale) => Ok(Type::Primitive(PrimitiveType::Decimal {
                 precision: *precision as u32,
                 scale: *scale as u32,
             })),
@@ -857,7 +875,7 @@ mod tests {
 
     #[test]
     fn test_arrow_schema_to_struct_type_unsupported_datatype() {
-        let arrow_schema = ArrowSchema::new(vec![Field::new("field1", DataType::UInt8, false)
+        let arrow_schema = ArrowSchema::new(vec![Field::new("field1", DataType::Date64, false)
             .with_metadata(HashMap::from([(
                 PARQUET_FIELD_ID_META_KEY.to_string(),
                 "1".to_string(),
@@ -866,6 +884,39 @@ mod tests {
         let result: Result<StructType, Error> = (&arrow_schema).try_into();
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::NotSupported(_)));
+    }
+
+    #[test]
+    fn test_arrow_schema_to_struct_type_uint_types() {
+        let arrow_schema = ArrowSchema::new(vec![
+            Field::new("field1", DataType::UInt8, false)
+                .with_metadata(HashMap::from([(
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    "1".to_string(),
+                )])),
+            Field::new("field2", DataType::UInt16, false)
+                .with_metadata(HashMap::from([(
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    "2".to_string(),
+                )])),
+            Field::new("field3", DataType::UInt32, false)
+                .with_metadata(HashMap::from([(
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    "3".to_string(),
+                )])),
+            Field::new("field4", DataType::UInt64, false)
+                .with_metadata(HashMap::from([(
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    "4".to_string(),
+                )])),
+        ]);
+
+        let struct_type: StructType = (&arrow_schema).try_into().unwrap();
+        
+        assert_eq!(struct_type[0].field_type, Type::Primitive(PrimitiveType::Int));
+        assert_eq!(struct_type[1].field_type, Type::Primitive(PrimitiveType::Int));
+        assert_eq!(struct_type[2].field_type, Type::Primitive(PrimitiveType::Int));
+        assert_eq!(struct_type[3].field_type, Type::Primitive(PrimitiveType::Long));
     }
 
     #[test]

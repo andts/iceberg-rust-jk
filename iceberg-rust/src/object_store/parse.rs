@@ -42,8 +42,8 @@ pub fn object_store_from_config(
     let store = default_builder
         .map(|mut builder| {
             for (key, option) in &config {
-                if let Ok(config_key) = key.parse() {
-                    builder = builder.with_config(config_key, option);
+                if let Ok(config_key) = key.parse::<String>() {
+                    builder = builder.with_config(config_key, option).expect("Failed to set config option");
                 }
             }
             let bucket = Bucket::from_path(url.as_str()).unwrap();
