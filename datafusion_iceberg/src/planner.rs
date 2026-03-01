@@ -376,6 +376,21 @@ async fn plan_create_namespace(
     let namespace = Namespace::try_new(&[namespace_name.to_owned()])
         .map_err(|err| DataFusionError::External(Box::new(err)))?;
 
+    let if_not_exists = node.0.if_not_exists;
+
+    if if_not_exists {
+        let ns_exists = catalog
+            .namespace_exists(&namespace)
+            .await
+            .map_err(|err| DataFusionError::External(Box::new(err)))?;
+
+        if ns_exists {
+            return Ok(Some(Arc::new(EmptyExec::new(Arc::new(
+                ArrowSchema::empty(),
+            )))));
+        }
+    }
+
     catalog
         .create_namespace(&namespace, None)
         .await
