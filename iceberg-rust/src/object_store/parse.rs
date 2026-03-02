@@ -2,7 +2,7 @@
 */
 
 use crate::error::Error;
-use crate::object_store::{Bucket, ObjectStoreBuilder};
+use crate::object_store::{Bucket, ConfigKey, ObjectStoreBuilder};
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::azure::{AzureConfigKey, MicrosoftAzureBuilder};
 use object_store::gcp::{GcpCredential, GoogleCloudStorageBuilder, GoogleConfigKey};
@@ -38,72 +38,17 @@ pub fn object_store_from_config(
     config: HashMap<String, String>,
     default_object_store_builder: &Option<ObjectStoreBuilder>,
 ) -> Result<Arc<dyn ObjectStore>, Error> {
-    let default_builder = default_object_store_builder.clone();
-    let store = default_builder
-        .map(|mut builder| {
-            for (key, option) in &config {
-                if let Ok(config_key) = key.parse::<String>() {
-                    builder = builder.with_config(config_key, option).expect("Failed to set config option");
-                }
+    if let Some(mut builder) = default_object_store_builder.clone() {
+        for (key, option) in &config {
+            if key.parse::<ConfigKey>().is_ok() {
+                builder = builder.with_config(key.clone(), option)?;
             }
-            let bucket = Bucket::from_path(url.as_str()).unwrap();
+        }
+        let bucket = Bucket::from_path(url.as_str())?;
+        return Ok(Arc::new(builder.build(bucket)?) as Arc<dyn ObjectStore>);
+    }
 
-            Arc::new(builder.build(bucket).unwrap()) as Arc<dyn ObjectStore>
-        })
-        .or_else(|| {
-            Some(match ObjectStoreScheme::parse(&url).map_err(object_store::Error::from).unwrap() {
-                (ObjectStoreScheme::AmazonS3, _) => {
-                    let mut builder = AmazonS3Builder::new().with_url(url);
-                    for (key, option) in &config {
-                        let s3_key = match key.as_str() {
-                            AWS_ACCESS_KEY_ID => AmazonS3ConfigKey::AccessKeyId,
-                            AWS_SECRET_ACCESS_KEY => AmazonS3ConfigKey::SecretAccessKey,
-                            AWS_SESSION_TOKEN => AmazonS3ConfigKey::Token,
-                            CLIENT_REGION | AWS_REGION => AmazonS3ConfigKey::Region,
-                            AWS_ENDPOINT => {
-                                if option.starts_with("http://") {
-                                    // This is mainly used for testing, e.g. against MinIO
-                                    builder = builder.with_allow_http(true);
-                                }
-                                AmazonS3ConfigKey::Endpoint
-                            }
-                            AWS_ALLOW_ANONYMOUS => AmazonS3ConfigKey::SkipSignature,
-                            _ => continue,
-                        };
-                        builder = builder.with_config(s3_key, option);
-                    }
-                    Arc::new(builder.build().unwrap()) as Arc<dyn ObjectStore>
-                }
-
-                (ObjectStoreScheme::GoogleCloudStorage, _) => {
-                    let mut builder = GoogleCloudStorageBuilder::new().with_url(url);
-                    for (key, option) in &config {
-                        let gcs_key = match key.as_str() {
-                            GCS_CREDENTIALS_JSON => GoogleConfigKey::ServiceAccountKey,
-                            GCS_BUCKET => GoogleConfigKey::Bucket,
-                            GCS_TOKEN => {
-                                let credential = GcpCredential { bearer: option.clone() };
-                                let credential_provider =
-                                    Arc::new(StaticCredentialProvider::new(credential)) as _;
-                                builder = builder.with_credentials(credential_provider);
-                                continue;
-                            }
-                            _ => continue,
-                        };
-                        builder = builder.with_config(gcs_key, option);
-                    }
-                    Arc::new(builder.build().unwrap()) as Arc<dyn ObjectStore>
-                }
-
-                _ => {
-                    let (store, _path) = parse_url_opts(&url, config).unwrap();
-                    store.into()
-                }
-            })
-        })
-        .expect("build object store");
-
-/*    let store = match ObjectStoreScheme::parse(&url).map_err(object_store::Error::from)? {
+    let store = match ObjectStoreScheme::parse(&url).map_err(object_store::Error::from)? {
         (ObjectStoreScheme::AmazonS3, _) => {
             let mut builder = AmazonS3Builder::new().with_url(url);
             for (key, option) in config {
@@ -173,7 +118,6 @@ pub fn object_store_from_config(
             store.into()
         }
     };
-*/
     Ok(store)
 }
 
@@ -276,7 +220,7 @@ mod tests {
         );
         config.insert(AZURE_STORAGE_ACCESS_KEY.to_string(), "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==".to_string());
 
-        let store = object_store_from_config(url, config).unwrap();
+        let store = object_store_from_config(url, config, &None).unwrap();
         let store_repr = format!("{store:?}");
 
         println!("{}", store_repr);
@@ -302,7 +246,7 @@ mod tests {
         );
         config.insert(AZURE_STORAGE_ACCESS_KEY.to_string(), "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==".to_string());
 
-        let store = object_store_from_config(url, config).unwrap();
+        let store = object_store_from_config(url, config, &None).unwrap();
         let store_repr = format!("{store:?}");
 
         assert!(store_repr.contains("account: \"testaccount\""));
