@@ -1,6 +1,48 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # iceberg-rust: Design Principles & Patterns
 
 Actionable guidelines for the iceberg-rust project, optimized for AI coding assistants.
+
+## Commands
+
+### Build & Check
+```sh
+cargo build                                         # Build all workspace members
+cargo clippy --all-targets --all-features -- -D warnings  # Lint (enforced in CI)
+cargo fmt --all -- --check                          # Format check
+```
+
+### Testing
+```sh
+make test                                           # Run all tests (spec + rust + datafusion)
+make test-iceberg-rust-spec                         # cargo test -p iceberg-rust-spec --lib
+make test-iceberg-rust                              # cargo test -p iceberg-rust --lib
+make test-datafusion_iceberg                        # cargo test -p datafusion_iceberg --tests -j 2
+make test-rest-catalog                              # cargo test -p iceberg-rest-catalog --lib
+make test-file-catalog                              # cargo test -p iceberg-file-catalog --lib
+make test-sql-catalog                               # cargo test -p iceberg-sql-catalog --lib
+
+# Run a single test by name
+cargo test -p iceberg-rust --lib -- my_test_name
+```
+
+### Workspace Members
+The workspace (`Cargo.toml`) contains these crates:
+- `iceberg-rust-spec` — pure spec types (serde, no I/O)
+- `iceberg-rust` — core table operations, catalog trait, arrow/parquet I/O
+- `datafusion_iceberg` — DataFusion query engine integration
+- `datafusion-iceberg-sql` — SQL utilities for DataFusion
+- `catalogs/iceberg-rest-catalog` — REST catalog (OpenAPI-generated client)
+- `catalogs/iceberg-sql-catalog` — SQL-backed catalog (SQLite/Postgres/MySQL)
+- `catalogs/iceberg-file-catalog` — Filesystem catalog
+- `catalogs/iceberg-glue-catalog` — AWS Glue catalog
+- `catalogs/iceberg-s3tables-catalog` — AWS S3 Tables catalog
+
+### DataFusion Dependency
+This repo uses a **fork** of DataFusion (not the official crates.io release). See `Cargo.toml` for the current git rev. To switch to local development of datafusion, uncomment the `#Local Changes` section and comment out the `#Fork` section.
 
 ## Project Architecture
 
