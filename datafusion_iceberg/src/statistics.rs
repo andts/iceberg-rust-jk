@@ -8,6 +8,7 @@ use iceberg_rust::file_format::parquet::estimate_distinct_count;
 use iceberg_rust::spec::{
     manifest::{ManifestEntry, Status},
     schema::Schema,
+    types::{PrimitiveType, Type},
     values::Value,
 };
 
@@ -66,7 +67,9 @@ fn column_statistics<'a>(
     schema: &'a Schema,
     manifest: &'a ManifestEntry,
 ) -> impl Iterator<Item = ColumnStatistics> + 'a {
-    schema.fields().iter().map(|x| x.id).map(|id| {
+    schema.fields().iter().map(|field| {
+        let id = field.id;
+        let field_type = &field.field_type;
         let data_file = &manifest.data_file();
         ColumnStatistics {
             null_count: data_file
@@ -81,7 +84,7 @@ fn column_statistics<'a>(
                 .and_then(|x| x.get(&id))
                 .and_then(|x| {
                     Some(Precision::Exact(
-                        convert_value_to_scalar_value(x.clone()).ok()?,
+                        convert_value_to_scalar_value(x.clone(), field_type).ok()?,
                     ))
                 })
                 .unwrap_or(Precision::Absent),
@@ -91,7 +94,7 @@ fn column_statistics<'a>(
                 .and_then(|x| x.get(&id))
                 .and_then(|x| {
                     Some(Precision::Exact(
-                        convert_value_to_scalar_value(x.clone()).ok()?,
+                        convert_value_to_scalar_value(x.clone(), field_type).ok()?,
                     ))
                 })
                 .unwrap_or(Precision::Absent),
@@ -110,7 +113,7 @@ pub(crate) fn manifest_statistics(schema: &Schema, manifest: &ManifestEntry) -> 
     }
 }
 
-fn convert_value_to_scalar_value(value: Value) -> Result<ScalarValue, Error> {
+fn convert_value_to_scalar_value(value: Value, field_type: &Type) -> Result<ScalarValue, Error> {
     match value {
         Value::Boolean(b) => Ok(ScalarValue::Boolean(Some(b))),
         Value::Int(i) => Ok(ScalarValue::Int32(Some(i))),
@@ -128,11 +131,30 @@ fn convert_value_to_scalar_value(value: Value) -> Result<ScalarValue, Error> {
         )),
         Value::Fixed(size, data) => Ok(ScalarValue::FixedSizeBinary(size as i32, Some(data))),
         Value::Binary(data) => Ok(ScalarValue::Binary(Some(data))),
-        Value::Decimal(decimal) => Ok(ScalarValue::Decimal128(
-            Some(decimal.try_into().unwrap()),
-            0,
-            0,
-        )),
+        Value::Decimal(mut decimal) => {
+            // Arrow requires a Decimal128 precision in [1, 38]; the declared
+            // column type carries the precision/scale, so use those rather than
+            // hardcoding (0, 0) (which makes the scalar impossible to
+            // materialize into an array). The value's unscaled integer
+            // representation (`mantissa`) must be read at the declared scale.
+            let (precision, scale) = match field_type {
+                Type::Primitive(PrimitiveType::Decimal { precision, scale }) => {
+                    (*precision as u8, *scale as i8)
+                }
+                _ => {
+                    return Err(Error::Conversion(
+                        "Iceberg decimal value".to_string(),
+                        format!("non-decimal field type {field_type:?}"),
+                    ));
+                }
+            };
+            decimal.rescale(scale as u32);
+            Ok(ScalarValue::Decimal128(
+                Some(decimal.mantissa()),
+                precision,
+                scale,
+            ))
+        }
         x => Err(Error::Conversion(
             "Iceberg value".to_string(),
             format!("{x:?}"),
@@ -183,5 +205,31 @@ fn new_distinct_count(acc: &ColumnStatistics, x: &ColumnStatistics) -> Precision
         }
         (Precision::Absent, Precision::Exact(_), _, _, _, _) => x.distinct_count,
         _ => acc.distinct_count.add(&x.distinct_count),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::convert_value_to_scalar_value;
+    use datafusion::scalar::ScalarValue;
+    use iceberg_rust::spec::{
+        types::{PrimitiveType, Type},
+        values::Value,
+    };
+
+    #[test]
+    fn decimal_stat_preserves_value_precision_and_scale() {
+        let decimal_type = Type::Primitive(PrimitiveType::Decimal {
+            precision: 15,
+            scale: 2,
+        });
+        // 104899.50 as it appears in a manifest bound: the unscaled i128
+        // (10_489_950) encoded big-endian.
+        let bytes = 10_489_950_i128.to_be_bytes();
+        let value = Value::try_from_bytes(&bytes, &decimal_type).unwrap();
+
+        let scalar = convert_value_to_scalar_value(value, &decimal_type).unwrap();
+
+        assert_eq!(scalar, ScalarValue::Decimal128(Some(10_489_950), 15, 2));
     }
 }
