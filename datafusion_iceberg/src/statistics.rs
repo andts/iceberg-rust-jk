@@ -266,4 +266,20 @@ mod tests {
             ScalarValue::Decimal128(Some(1234), 10, 2)
         );
     }
+
+    #[test]
+    fn decimal_stat_preserves_value_precision_and_scale() {
+        let decimal_type = Type::Primitive(PrimitiveType::Decimal {
+            precision: 15,
+            scale: 2,
+        });
+        // 104899.50 as it appears in a manifest bound: the unscaled i128
+        // (10_489_950) encoded big-endian.
+        let bytes = 10_489_950_i128.to_be_bytes();
+        let value = Value::try_from_bytes(&bytes, &decimal_type).unwrap();
+
+        let scalar = convert_value_to_scalar_value(value, &decimal_type).unwrap();
+
+        assert_eq!(scalar, ScalarValue::Decimal128(Some(10_489_950), 15, 2));
+    }
 }
