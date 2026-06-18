@@ -376,7 +376,10 @@ fn fake_object_store_url(table_location_url: &str) -> ObjectStoreUrl {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[instrument(name = "datafusion_iceberg::table_scan", level = "debug", skip(arrow_schema, session, filters), fields(
+// `table` and `config` are skipped from auto-captured span fields: their Debug
+// output includes the object-store credentials (S3 access key / secret), which
+// must never be written to logs. Only the identifier is recorded explicitly.
+#[instrument(name = "datafusion_iceberg::table_scan", level = "debug", skip(table, arrow_schema, config, session, filters), fields(
     table_identifier = %table.identifier(),
     snapshot_range = ?snapshot_range,
     projection = ?projection,
