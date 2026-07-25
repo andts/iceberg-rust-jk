@@ -395,8 +395,8 @@ impl<'schema, 'metadata> ManifestWriter<'schema, 'metadata> {
             manifest.existing_rows_count.unwrap_or(0) + manifest.added_rows_count.unwrap_or(0),
         );
 
-        manifest.added_files_count = None;
-        manifest.added_rows_count = None;
+        manifest.added_files_count = Some(0);
+        manifest.added_rows_count = Some(0);
 
         Ok(ManifestWriter {
             manifest,
@@ -543,8 +543,8 @@ impl<'schema, 'metadata> ManifestWriter<'schema, 'metadata> {
                 - filtered_stats.removed_records,
         );
 
-        manifest.added_files_count = None;
-        manifest.added_rows_count = None;
+        manifest.added_files_count = Some(0);
+        manifest.added_rows_count = Some(0);
 
         Ok((
             ManifestWriter {
