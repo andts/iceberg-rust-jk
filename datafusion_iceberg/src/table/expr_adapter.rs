@@ -279,14 +279,25 @@ mod tests {
 
     /// A file where the same field id is stamped on two different physical
     /// columns is malformed; guessing which one is meant would risk silently
-    /// aliasing onto the wrong data, so remapping is abandoned before any
-    /// renames are even computed. The two physical fields deliberately have
-    /// different names (unlike `remapping_is_abandoned_when_it_would_collide`,
-    /// where the collision is in the *resulting* names) so this exercises the
-    /// duplicate-id guard specifically.
+    /// aliasing onto the wrong data, so a file that repeats a field id must
+    /// abandon remapping entirely rather than pick an arbitrary winner.
+    ///
+    /// Critically, the logical schema has a field whose id (5) matches the
+    /// *duplicated* physical id, not some other id absent from the file. If
+    /// the duplicate-id guard were removed, `by_id` would just keep the last
+    /// physical field seen for id 5 (`"y"`), `data` would get renamed to `"y"`,
+    /// and the column would silently resolve to whichever duplicate happened
+    /// to win -- the exact wrong-column read this guard exists to prevent.
+    /// With the guard, that never happens: remapping is abandoned wholesale,
+    /// so `data` isn't found by name in the file and nulls out instead.
+    ///
+    /// The two duplicate-id physical fields deliberately have different names
+    /// (unlike `remapping_is_abandoned_when_it_would_collide`, where the
+    /// collision is in the *resulting* names) so this exercises the
+    /// duplicate-id guard specifically, not the resulting-name-collision guard.
     #[test]
     fn remapping_is_abandoned_when_the_file_repeats_a_field_id() {
-        let logical = Schema::new(vec![field("id", Some(1)), field("data", Some(9))]);
+        let logical = Schema::new(vec![field("id", Some(1)), field("data", Some(5))]);
         // Two different physical columns both claim field id 5 -- a malformed file.
         let physical = Schema::new(vec![field("x", Some(5)), field("y", Some(5))]);
 
