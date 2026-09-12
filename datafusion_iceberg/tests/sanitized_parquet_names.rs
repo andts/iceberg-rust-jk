@@ -230,6 +230,16 @@ async fn sanitized_parquet_names_are_resolved_by_field_id() {
         out.contains("1010") && out.contains("1020"),
         "whitespace column read back as NULL:\n{out}"
     );
+    // `filler_column_with_a_very_long_name` was also renamed (to `f`), with no
+    // whitespace involved. This is what distinguishes a genuine field-id-based
+    // fix from one that merely reverses Iceberg-Java's `_xNN` name
+    // sanitization: a name-unsanitizing fix would make `my col` resolve again
+    // (since `my_x20col` decodes back to it) while leaving this column -- and
+    // any other non-whitespace rename -- still reading back as NULL.
+    assert!(
+        out.contains("1100") && out.contains("1200"),
+        "filler_column_with_a_very_long_name read back as NULL:\n{out}"
+    );
     // The user-visible name must still be the Iceberg one, not the file's.
     assert!(
         out.contains("my col") && !out.contains("my_x20col"),
