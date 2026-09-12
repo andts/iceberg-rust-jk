@@ -2483,6 +2483,7 @@ dependencies = [
  "itertools",
  "lru",
  "object_store",
+ "parquet",
  "pin-project-lite",
  "pyo3",
  "regex",
