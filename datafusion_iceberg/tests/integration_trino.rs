@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::{fs::File, time::Duration};
 
-use datafusion::arrow::array::{Float64Array, RecordBatch};
+use datafusion::arrow::array::{Array, Float64Array, Int32Array, RecordBatch};
 use datafusion::execution::context::SessionContext;
 use datafusion_iceberg::catalog::catalog::IcebergCatalog;
 use iceberg_rest_catalog::apis::configuration::Configuration;
@@ -241,7 +241,7 @@ async fn integration_trino_rest() {
         .await
         .unwrap();
 
-    assert_eq!(tables.len(), 8);
+    assert_eq!(tables.len(), 9);
 
     let ctx = SessionContext::new();
 
@@ -369,4 +369,31 @@ async fn integration_trino_rest() {
         .expect("Failed to get values from batch.");
 
     assert!(values.value(0) - 2127396830.0 < 0.1);
+
+    // A column whose Iceberg name contains whitespace is stored by Trino under
+    // a sanitized parquet name (`my_x20col`); only the field id ties the two
+    // together. Matching by name would silently return NULL here.
+    let df = ctx
+        .sql(r#"SELECT "my col" FROM iceberg.test.whitespace_cols;"#)
+        .await
+        .unwrap();
+
+    let results: Vec<RecordBatch> = df.collect().await.expect("Failed to execute query plan.");
+    let batch = results
+        .into_iter()
+        .find(|batch| batch.num_rows() > 0)
+        .expect("All record batches are empty");
+
+    assert_eq!(
+        batch.schema().field(0).name(),
+        "my col",
+        "the Iceberg column name must survive the scan"
+    );
+    let values = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .expect("Failed to get values from batch.");
+    assert!(!values.is_null(0), "whitespace column read back as NULL");
+    assert_eq!(values.value(0), 42);
 }
