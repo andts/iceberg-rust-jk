@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::array::{ArrayRef, Int64Array, RecordBatch};
+use datafusion::arrow::array::{Array, ArrayRef, Int64Array, RecordBatch};
 use datafusion::arrow::datatypes::{Field, Schema};
 use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion::common::tree_node::{TransformedResult, TreeNode};
@@ -214,35 +214,76 @@ async fn sanitized_parquet_names_are_resolved_by_field_id() {
 
     // Read from a *fresh* session, as an executor pod always is.
     let cold = boot(&dir).await;
-    let out = pretty_format_batches(&run(&cold, "SELECT * FROM warehouse.ws.t ORDER BY id").await)
-        .unwrap()
-        .to_string();
+    let out_batches = run(&cold, "SELECT * FROM warehouse.ws.t ORDER BY id").await;
+    let out = pretty_format_batches(&out_batches).unwrap().to_string();
     println!("{out}");
     let _ = std::fs::remove_dir_all(&dir);
 
-    // `rewrite_parquet` adds 1000 to every value, so a populated column also
-    // proves the rewritten file -- not a cached copy -- is what was read.
-    assert!(
-        out.contains("1001"),
-        "expected the rewritten file to be the one read:\n{out}"
-    );
-    assert!(
-        out.contains("1010") && out.contains("1020"),
-        "whitespace column read back as NULL:\n{out}"
-    );
-    // `filler_column_with_a_very_long_name` was also renamed (to `f`), with no
-    // whitespace involved. This is what distinguishes a genuine field-id-based
-    // fix from one that merely reverses Iceberg-Java's `_xNN` name
-    // sanitization: a name-unsanitizing fix would make `my col` resolve again
-    // (since `my_x20col` decodes back to it) while leaving this column -- and
-    // any other non-whitespace rename -- still reading back as NULL.
-    assert!(
-        out.contains("1100") && out.contains("1200"),
-        "filler_column_with_a_very_long_name read back as NULL:\n{out}"
-    );
     // The user-visible name must still be the Iceberg one, not the file's.
     assert!(
         out.contains("my col") && !out.contains("my_x20col"),
         "output schema should keep the Iceberg column name:\n{out}"
+    );
+
+    // A substring search over the pretty-printed table (e.g. `out.contains("1010")`)
+    // can only prove "not NULL", not "in the right column": if `my col` and
+    // `filler_column_with_a_very_long_name` were cross-wired by a faulty
+    // field-id pairing, every value would still appear *somewhere* in `out`
+    // and a substring check would pass regardless. Returning the wrong
+    // column's data is the single worst outcome this change could produce, so
+    // pin every value to its column and row instead, straight off the
+    // `RecordBatch`.
+    //
+    // `rewrite_parquet` adds 1000 to every value, and renames both `my col`
+    // (to `my_x20col`) and `filler_column_with_a_very_long_name` (to `f`) --
+    // the latter with no whitespace involved. That second rename is what
+    // distinguishes a genuine field-id-based fix from one that merely
+    // reverses Iceberg-Java's `_xNN` name sanitization: a name-unsanitizing
+    // fix would make `my col` resolve again (since `my_x20col` decodes back
+    // to it) while leaving this column -- and any other non-whitespace
+    // rename -- still reading back as NULL.
+    let schema = out_batches[0].schema();
+    let id_idx = schema.index_of("id").expect("id column");
+    let my_col_idx = schema.index_of("my col").expect("`my col` column");
+    let filler_idx = schema
+        .index_of("filler_column_with_a_very_long_name")
+        .expect("filler column");
+
+    let mut rows: Vec<(i64, Option<i64>, Option<i64>)> = Vec::new();
+    for batch in &out_batches {
+        let ids = batch
+            .column(id_idx)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("id is Int64");
+        let my_cols = batch
+            .column(my_col_idx)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("`my col` is Int64");
+        let fillers = batch
+            .column(filler_idx)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("filler column is Int64");
+        for i in 0..batch.num_rows() {
+            rows.push((
+                ids.value(i),
+                (!my_cols.is_null(i)).then(|| my_cols.value(i)),
+                (!fillers.is_null(i)).then(|| fillers.value(i)),
+            ));
+        }
+    }
+
+    assert_eq!(
+        rows,
+        vec![
+            (1001, Some(1010), Some(1100)),
+            (1002, Some(1020), Some(1200)),
+        ],
+        "each row's `id`, `my col` and `filler_column_with_a_very_long_name` \
+         values must land in their own column, unchanged and not cross-wired \
+         with one another, proving the rewritten file -- not a cached copy --\
+         was read:\n{out}"
     );
 }

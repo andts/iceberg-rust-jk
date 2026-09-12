@@ -20,6 +20,30 @@
  *
  * Files whose names already agree -- everything this stack writes itself, since
  * iceberg-rust stores names verbatim -- take an identity fast path.
+ *
+ * # Scope: top-level columns only
+ *
+ * The id-based pairing this module does covers only top-level fields of the
+ * table schema. Nested struct subfields are still matched by DataFusion *by
+ * name*, exactly as before this module existed: a renamed nullable subfield
+ * silently reads back as NULL, a renamed required subfield errors, and a
+ * struct where *no* subfield name survives sanitization errors with "no field
+ * name overlap". A future change that wants id-based resolution inside nested
+ * types needs to walk the struct/list/map trees explicitly; nothing here does
+ * that.
+ *
+ * # Known gap: absent ids still fall back to name matching
+ *
+ * A logical field id that appears nowhere in a file that *does* carry field
+ * ids should, per Iceberg's column-projection rule, resolve to NULL for that
+ * file. Today it instead falls back to matching that field by name against
+ * the file, and can return whatever data a like-named physical column holds.
+ * This is reachable by dropping a column and re-adding one under the same
+ * name (Iceberg never reuses field ids, so the new column gets a fresh id
+ * that the old files don't carry, but the old *name* may still be present in
+ * those files under the old id). This is pre-existing behaviour -- it
+ * predates this module and is not introduced by it -- and is deliberately
+ * left unfixed here; it is out of scope for this change.
 */
 
 use std::collections::{HashMap, HashSet};
@@ -38,6 +62,15 @@ use iceberg_rust::spec::arrow::schema::PARQUET_FIELD_ID_META_KEY;
 /// A [`PhysicalExprAdapterFactory`] that matches file columns to table columns
 /// by Iceberg field id, falling back to DataFusion's name matching whenever the
 /// ids cannot settle it.
+///
+/// Note: DataFusion's own parquet type coercions (`apply_file_schema_type_coercions`,
+/// `Int96Coercer`) run *before* this adapter is consulted, and they too match
+/// by name -- so a column this module ends up renaming does not benefit from
+/// them at that stage. Results still come out correct, because the delegated
+/// `DefaultPhysicalExprAdapter` inserts the equivalent cast itself once the
+/// schema has been renamed; the only loss is that a renamed string column
+/// does not get the view-type (`StringViewArray`) optimization those
+/// coercions would otherwise have applied.
 #[derive(Debug, Clone, Default)]
 pub struct IcebergPhysicalExprAdapterFactory;
 
@@ -86,18 +119,32 @@ fn field_id(field: &Field) -> Option<i32> {
 ///
 /// Returns an empty map -- meaning "leave everything to the default adapter" --
 /// when no name differs, or when applying the renames would make two logical
-/// fields share a name. Aliasing two columns onto one would read the wrong data
-/// silently, which is the very failure this module exists to prevent.
+/// fields share a name. Abandoning the rename in that case is not a guarantee
+/// of correctness: it simply falls back to DataFusion's pre-existing
+/// name-matching behaviour, which can itself resolve to the wrong column (for
+/// example when a stale, like-named physical column lingers in the file). It
+/// is better than guessing which of two colliding fields is meant, but it is
+/// not a safety net. Each path that abandons remapping logs a `tracing::warn!`
+/// so a malformed or ambiguous file is not silently indistinguishable from a
+/// well-formed one.
 fn renames_by_field_id(logical: &Schema, physical: &Schema) -> HashMap<String, String> {
     let mut by_id: HashMap<i32, &str> = HashMap::new();
     for f in physical.fields() {
         if let Some(id) = field_id(f) {
             // A duplicate id is a malformed file; do not guess which one is meant.
             if by_id.insert(id, f.name().as_str()).is_some() {
+                tracing::warn!(
+                    "parquet file has field id {id} stamped on more than one \
+                     column; falling back to name matching for this file"
+                );
                 return HashMap::new();
             }
         }
     }
+    // No ids in the file at all: no logical field can acquire a rename below,
+    // so this is purely a fast path, not a correctness guard -- removing it
+    // would not change the result, only skip straight to the loop that would
+    // return the same empty map anyway.
     if by_id.is_empty() {
         return HashMap::new();
     }
@@ -109,10 +156,28 @@ fn renames_by_field_id(logical: &Schema, physical: &Schema) -> HashMap<String, S
             .and_then(|id| by_id.get(&id).copied())
             .unwrap_or_else(|| f.name().as_str());
         if !resulting_names.insert(physical_name.to_string()) {
+            tracing::warn!(
+                "resolving by Iceberg field id would alias two logical columns \
+                 onto the file column {physical_name:?}; falling back to name \
+                 matching for this file"
+            );
             return HashMap::new();
         }
         if physical_name != f.name() {
-            renames.insert(f.name().clone(), physical_name.to_string());
+            // Iceberg forbids duplicate field names in a schema, so this
+            // insert should never overwrite an existing entry -- but check
+            // that structurally rather than relying on the invariant holding.
+            if renames
+                .insert(f.name().clone(), physical_name.to_string())
+                .is_some()
+            {
+                let name = f.name();
+                tracing::warn!(
+                    "two logical fields share the name {name:?}; falling back \
+                     to name matching for this file"
+                );
+                return HashMap::new();
+            }
         }
     }
     renames

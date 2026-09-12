@@ -37,7 +37,7 @@ duckdb = { version = "1.10503", features = ["bundled"] }
 iceberg-rest-catalog = { path = "../catalogs/iceberg-rest-catalog" }
 iceberg-rust = { path = "../iceberg-rust", version = "0.10.0", features = ["test-utils"] }
 iceberg-sql-catalog = { path = "../catalogs/iceberg-sql-catalog" }
-parquet = { version = "58", features = ["arrow"] }
+parquet = { workspace = true, features = ["arrow"] }
 pyo3 = { version = "0.28", features = ["auto-initialize"] }
 reqwest = "0.12"
 rstest = "0.26"
