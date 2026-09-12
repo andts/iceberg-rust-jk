@@ -2,6 +2,8 @@
  * Tableprovider to use iceberg table with datafusion.
 */
 
+mod expr_adapter;
+
 use async_trait::async_trait;
 use chrono::DateTime;
 use datafusion::arrow::array::RecordBatch;
