@@ -276,4 +276,28 @@ mod tests {
             "expected remapping to be skipped, got {rewritten:?}"
         );
     }
+
+    /// A file where the same field id is stamped on two different physical
+    /// columns is malformed; guessing which one is meant would risk silently
+    /// aliasing onto the wrong data, so remapping is abandoned before any
+    /// renames are even computed. The two physical fields deliberately have
+    /// different names (unlike `remapping_is_abandoned_when_it_would_collide`,
+    /// where the collision is in the *resulting* names) so this exercises the
+    /// duplicate-id guard specifically.
+    #[test]
+    fn remapping_is_abandoned_when_the_file_repeats_a_field_id() {
+        let logical = Schema::new(vec![field("id", Some(1)), field("data", Some(9))]);
+        // Two different physical columns both claim field id 5 -- a malformed file.
+        let physical = Schema::new(vec![field("x", Some(5)), field("y", Some(5))]);
+
+        let rewritten = adapter(logical, physical)
+            .rewrite(Arc::new(Column::new("data", 1)))
+            .unwrap();
+
+        // No rename applied; `data` is simply missing from the file, so it nulls.
+        let literal = rewritten
+            .downcast_ref::<Literal>()
+            .unwrap_or_else(|| panic!("expected a NULL literal, got {rewritten:?}"));
+        assert_eq!(literal.value(), &ScalarValue::Int64(None));
+    }
 }
