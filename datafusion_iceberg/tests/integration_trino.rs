@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::{fs::File, time::Duration};
 
-use datafusion::arrow::array::{Float64Array, RecordBatch};
+use datafusion::arrow::array::{
+    Array, Float64Array, Int32Array, RecordBatch, StringArray, StringViewArray,
+};
 use datafusion::execution::context::SessionContext;
 use datafusion_iceberg::catalog::catalog::IcebergCatalog;
 use iceberg_rest_catalog::apis::configuration::Configuration;
@@ -241,7 +243,7 @@ async fn integration_trino_rest() {
         .await
         .unwrap();
 
-    assert_eq!(tables.len(), 8);
+    assert_eq!(tables.len(), 9);
 
     let ctx = SessionContext::new();
 
@@ -369,4 +371,80 @@ async fn integration_trino_rest() {
         .expect("Failed to get values from batch.");
 
     assert!(values.value(0) - 2127396830.0 < 0.1);
+
+    // Both `my col` and `grp col` are stored by Trino under sanitized parquet
+    // names (`my_x20col`, `grp_x20col`); only the field id ties either back
+    // to its Iceberg name. Selecting a single column cannot catch the two
+    // being cross-wired with each other -- both would still read back
+    // non-NULL even if the file-column pairing swapped them -- so select all
+    // three columns together and pin each value to its own column.
+    let df = ctx
+        .sql(r#"SELECT id, "my col", "grp col" FROM iceberg.test.whitespace_cols;"#)
+        .await
+        .unwrap();
+
+    let results: Vec<RecordBatch> = df.collect().await.expect("Failed to execute query plan.");
+    let batch = results
+        .into_iter()
+        .find(|batch| batch.num_rows() > 0)
+        .expect("All record batches are empty");
+
+    let schema = batch.schema();
+    assert_eq!(
+        schema.field(0).name(),
+        "id",
+        "the Iceberg column name must survive the scan"
+    );
+    assert_eq!(
+        schema.field(1).name(),
+        "my col",
+        "the Iceberg column name must survive the scan"
+    );
+    assert_eq!(
+        schema.field(2).name(),
+        "grp col",
+        "the Iceberg column name must survive the scan"
+    );
+
+    let ids = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .expect("Failed to get id values from batch.");
+    assert!(!ids.is_null(0), "id column read back as NULL");
+    assert_eq!(ids.value(0), 1);
+
+    let my_col = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .expect("Failed to get `my col` values from batch.");
+    assert!(!my_col.is_null(0), "whitespace column read back as NULL");
+    assert_eq!(my_col.value(0), 42);
+
+    // The renamed string column may or may not have kept the view-type
+    // optimization DataFusion's parquet type coercions would otherwise apply
+    // (see the note on `IcebergPhysicalExprAdapterFactory` in
+    // `expr_adapter.rs`) -- this is a fixture/runtime detail, not the
+    // behaviour under test, so accept either representation.
+    let grp_col = batch.column(2).as_any();
+    let grp_value = if let Some(a) = grp_col.downcast_ref::<StringViewArray>() {
+        assert!(
+            !a.is_null(0),
+            "whitespace group column read back as NULL"
+        );
+        a.value(0).to_string()
+    } else if let Some(a) = grp_col.downcast_ref::<StringArray>() {
+        assert!(
+            !a.is_null(0),
+            "whitespace group column read back as NULL"
+        );
+        a.value(0).to_string()
+    } else {
+        panic!(
+            "Failed to get `grp col` values from batch; schema was {:?}",
+            batch.schema()
+        );
+    };
+    assert_eq!(grp_value, "a");
 }
