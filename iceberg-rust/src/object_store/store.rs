@@ -5,13 +5,19 @@ use iceberg_rust_spec::{
     tabular::{TabularMetadata, TabularMetadataRef},
     util::strip_prefix,
 };
-use object_store::{Attributes, ObjectStore, ObjectStoreExt, PutOptions, TagSet};
+use object_store::{path::Path, Attributes, ObjectStore, ObjectStoreExt, PutOptions, TagSet};
 
 use crate::error::Error;
 use flate2::read::GzDecoder;
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::io::Read;
+
+/// Convert a location from Iceberg metadata to an object-store key without
+/// re-encoding its percent escapes (e.g. Trino's `p_brand=Brand%2315`).
+pub fn path_from_location(location: &str) -> Result<Path, object_store::path::Error> {
+    Path::parse(strip_prefix(location))
+}
 
 /// Simplify interaction with iceberg files
 #[async_trait]
@@ -134,8 +140,26 @@ fn parse_metadata(location: &str, bytes: &[u8]) -> Result<TabularMetadata, Error
 #[cfg(test)]
 mod tests {
     use super::*;
+    use object_store::{memory::InMemory, path::Path};
     use rstest::rstest;
     use std::io::Write;
+
+    #[tokio::test]
+    async fn manifest_path_reads_literal_percent_encoded_s3_key() {
+        let store = InMemory::new();
+        let key = Path::parse("data/p_brand=Brand%2315/file.parquet").unwrap();
+        store.put(&key, b"parquet".to_vec().into()).await.unwrap();
+
+        let location = "s3://bucket/data/p_brand=Brand%2315/file.parquet";
+        let bytes = store
+            .get(&path_from_location(location).unwrap())
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ref(), b"parquet");
+    }
 
     #[test]
     fn test_version_hint_path_normal_case() {
