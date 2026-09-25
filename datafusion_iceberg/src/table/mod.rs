@@ -20,7 +20,7 @@ use iceberg_rust::arrow::write::{generate_file_path, generate_partition_path};
 use iceberg_rust::file_format::parquet::{
     parquet_to_datafile, ICEBERG_ESTIMATE_INT64_DISTINCT_COUNT_META_KEY,
 };
-use iceberg_rust::object_store::Bucket;
+use iceberg_rust::object_store::{store::path_from_location, Bucket};
 use iceberg_rust::spec::partition::BoundPartitionField;
 use iceberg_rust::spec::table_metadata::{
     self, TableMetadata, WRITE_METADATA_METRICS_DISTINCT_COUNTS_ENABLED,
@@ -1557,7 +1557,8 @@ fn generate_partitioned_file(
     }
 
     let object_meta = ObjectMeta {
-        location: util::strip_prefix(manifest.data_file().file_path()).into(),
+        location: path_from_location(manifest.data_file().file_path())
+            .map_err(|err| DataFusionError::External(Box::new(err)))?,
         size: *manifest.data_file().file_size_in_bytes() as u64,
         last_modified: {
             let secs = last_updated_ms / 1000;
