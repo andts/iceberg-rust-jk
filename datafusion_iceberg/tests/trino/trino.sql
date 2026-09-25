@@ -7,3 +7,4 @@ create table iceberg.test.part as select * from tpch.tiny.part;
 create table iceberg.test.partsupp as select * from tpch.tiny.partsupp;
 create table iceberg.test.region as select * from tpch.tiny.region;
 create table iceberg.test.supplier as select * from tpch.tiny.supplier;
+create table iceberg.test.whitespace_cols as select 1 as id, 42 as "my col", 'a' as "grp col";

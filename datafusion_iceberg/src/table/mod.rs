@@ -3,6 +3,7 @@
 */
 
 mod dv_exec;
+mod expr_adapter;
 
 use async_trait::async_trait;
 use chrono::DateTime;
@@ -42,6 +43,7 @@ use tokio::sync::mpsc::{self};
 use tracing::{instrument, Instrument};
 
 use crate::statistics::statistics_from_datafiles;
+use crate::table::expr_adapter::IcebergPhysicalExprAdapterFactory;
 use crate::{
     error::Error as DataFusionIcebergError,
     pruning_statistics::{transform_predicate, PruneDataFiles, PruneManifests},
@@ -51,6 +53,7 @@ use datafusion::arrow::compute::SortOptions;
 use datafusion::common::{NullEquality, Statistics};
 use datafusion::datasource::physical_plan::FileScanConfig;
 use datafusion::parquet::arrow::RowNumber;
+use datafusion::physical_expr_adapter::PhysicalExprAdapterFactory;
 use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
 use datafusion::physical_plan::empty::EmptyExec;
 use datafusion::physical_plan::ColumnStatistics;
@@ -925,6 +928,11 @@ async fn table_scan(
         Arc::new(source)
     };
 
+    // Iceberg-java writers sanitize parquet column names, so file columns must
+    // be matched by field id rather than by name. See `expr_adapter`.
+    let expr_adapter: Arc<dyn PhysicalExprAdapterFactory> =
+        Arc::new(IcebergPhysicalExprAdapterFactory);
+
     // Create plan for every partition with equality delete files. Partitions
     // whose only deletes are deletion vectors never reach `delete_file_groups`
     // (DV entries go straight into `dv_entries`); they're handled by the
@@ -935,6 +943,7 @@ async fn table_scan(
             let statistics = statistics.clone();
             let schema = &schema;
             let file_source = file_source.clone();
+            let expr_adapter = expr_adapter.clone();
             let projection_expr = projection_expr.clone();
             let projection = projection.clone();
             let mut data_files = data_file_groups
@@ -989,6 +998,7 @@ async fn table_scan(
                         let statistics = statistics.clone();
                         let schema = &schema;
                         let file_source = file_source.clone();
+                        let expr_adapter = expr_adapter.clone();
                         let mut data_files = Vec::new();
                         let equality_projection = equality_projection.clone();
 
@@ -1077,6 +1087,7 @@ async fn table_scan(
                                 object_store_url.clone(),
                                 delete_file_source,
                             )
+                            .with_expr_adapter(Some(expr_adapter.clone()))
                             .with_file_group(FileGroup::new(vec![delete_file]))
                             .with_statistics(statistics.clone())
                             .with_limit(limit)
@@ -1088,6 +1099,7 @@ async fn table_scan(
 
                             let file_scan_config =
                                 FileScanConfigBuilder::new(object_store_url, file_source.clone())
+                                    .with_expr_adapter(Some(expr_adapter.clone()))
                                     .with_file_group(FileGroup::new(data_files))
                                     .with_statistics(statistics)
                                     .with_projection_indices(Some(equality_projection))?
@@ -1165,6 +1177,7 @@ async fn table_scan(
                 if !additional_data_files.is_empty() {
                     let file_scan_config =
                         FileScanConfigBuilder::new(object_store_url, file_source)
+                            .with_expr_adapter(Some(expr_adapter.clone()))
                             .with_file_group(FileGroup::new(additional_data_files))
                             .with_statistics(statistics)
                             .with_projection_indices(Some(equality_projection))?
@@ -1258,6 +1271,7 @@ async fn table_scan(
     if !unattested_groups.is_empty() {
         let file_scan_config =
             FileScanConfigBuilder::new(object_store_url.clone(), file_source.clone())
+                .with_expr_adapter(Some(expr_adapter.clone()))
                 .with_file_groups(unattested_groups)
                 .with_statistics(statistics.clone())
                 .with_projection_indices(Some(internal_projection.clone()))?
@@ -1290,6 +1304,7 @@ async fn table_scan(
         let file_groups =
             regroup_attested_files_by_statistics(session, &scan_schema, attested_groups, ordering);
         let file_scan_config = FileScanConfigBuilder::new(object_store_url, file_source)
+            .with_expr_adapter(Some(expr_adapter))
             .with_file_groups(file_groups)
             .with_statistics(statistics)
             .with_output_ordering(vec![ordering.clone()])
