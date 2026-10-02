@@ -3,7 +3,8 @@
 */
 
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    cmp::Ordering,
+    collections::{hash_map::Entry, HashMap, HashSet},
     ops::Sub,
 };
 
@@ -139,6 +140,8 @@ pub fn parquet_to_datafile(
     // Which mode produced each column's bounds, so truncation can be applied
     // once at the end rather than per row group.
     let mut column_metrics_modes: HashMap<i32, MetricsMode> = HashMap::new();
+    // Columns whose row groups produced bounds of different value types.
+    let mut conflicting_bounds: HashSet<i32> = HashSet::new();
 
     for row_group in file_metadata.row_groups() {
         for column in row_group.columns() {
@@ -264,130 +267,37 @@ pub fn parquet_to_datafile(
                     }
                 }
 
-                if let Some(min_bytes) = statistics
-                    .min_bytes_opt()
-                    .filter(|_| metrics_mode.records_bounds())
-                {
-                    if let Type::Primitive(_) = &data_type {
-                        let new = Value::try_from_bytes_with_hint(
+                // Parquet truncates long statistics (64 bytes by default): a
+                // truncated min is a prefix, so still a lower bound, and a
+                // truncated max is rounded up, so still an upper bound.
+                if metrics_mode.records_bounds() && matches!(data_type, Type::Primitive(_)) {
+                    if let Some(min_bytes) = statistics.min_bytes_opt() {
+                        let min = Value::try_from_bytes_with_hint(
                             min_bytes,
                             data_type,
                             physical_type_hint,
                         )?;
-                        match lower_bounds.entry(id) {
-                            Entry::Occupied(mut entry) => {
-                                let entry = entry.get_mut();
-                                match (&entry, &new) {
-                                    (Value::Int(current), Value::Int(new_val))
-                                        if *current > *new_val =>
-                                    {
-                                        *entry = new
-                                    }
-                                    (Value::LongInt(current), Value::LongInt(new_val))
-                                        if *current > *new_val =>
-                                    {
-                                        *entry = new
-                                    }
-                                    (Value::Float(current), Value::Float(new_val))
-                                        if *current > *new_val =>
-                                    {
-                                        *entry = new
-                                    }
-                                    (Value::Double(current), Value::Double(new_val))
-                                        if *current > *new_val =>
-                                    {
-                                        *entry = new
-                                    }
-                                    (Value::Date(current), Value::Date(new_val))
-                                        if *current > *new_val =>
-                                    {
-                                        *entry = new
-                                    }
-                                    (Value::Time(current), Value::Time(new_val))
-                                        if *current > *new_val =>
-                                    {
-                                        *entry = new
-                                    }
-                                    (Value::Timestamp(current), Value::Timestamp(new_val))
-                                        if *current > *new_val =>
-                                    {
-                                        *entry = new
-                                    }
-                                    (Value::TimestampTZ(current), Value::TimestampTZ(new_val))
-                                        if *current > *new_val =>
-                                    {
-                                        *entry = new
-                                    }
-                                    _ => (),
-                                }
-                            }
-                            Entry::Vacant(entry) => {
-                                entry.insert(new);
-                            }
-                        }
+                        merge_bound(
+                            &mut lower_bounds,
+                            &mut conflicting_bounds,
+                            id,
+                            min,
+                            Ordering::Less,
+                        );
                     }
-                }
-                if let Some(max_bytes) = statistics
-                    .max_bytes_opt()
-                    .filter(|_| metrics_mode.records_bounds())
-                {
-                    if let Type::Primitive(_) = &data_type {
-                        let new = Value::try_from_bytes_with_hint(
+                    if let Some(max_bytes) = statistics.max_bytes_opt() {
+                        let max = Value::try_from_bytes_with_hint(
                             max_bytes,
                             data_type,
                             physical_type_hint,
                         )?;
-                        match upper_bounds.entry(id) {
-                            Entry::Occupied(mut entry) => {
-                                let entry = entry.get_mut();
-                                match (&entry, &new) {
-                                    (Value::Int(current), Value::Int(new_val))
-                                        if *current < *new_val =>
-                                    {
-                                        *entry = new
-                                    }
-                                    (Value::LongInt(current), Value::LongInt(new_val))
-                                        if *current < *new_val =>
-                                    {
-                                        *entry = new
-                                    }
-                                    (Value::Float(current), Value::Float(new_val))
-                                        if *current < *new_val =>
-                                    {
-                                        *entry = new
-                                    }
-                                    (Value::Double(current), Value::Double(new_val))
-                                        if *current < *new_val =>
-                                    {
-                                        *entry = new
-                                    }
-                                    (Value::Date(current), Value::Date(new_val))
-                                        if *current < *new_val =>
-                                    {
-                                        *entry = new
-                                    }
-                                    (Value::Time(current), Value::Time(new_val))
-                                        if *current < *new_val =>
-                                    {
-                                        *entry = new
-                                    }
-                                    (Value::Timestamp(current), Value::Timestamp(new_val))
-                                        if *current < *new_val =>
-                                    {
-                                        *entry = new
-                                    }
-                                    (Value::TimestampTZ(current), Value::TimestampTZ(new_val))
-                                        if *current < *new_val =>
-                                    {
-                                        *entry = new
-                                    }
-                                    _ => (),
-                                }
-                            }
-                            Entry::Vacant(entry) => {
-                                entry.insert(new);
-                            }
-                        }
+                        merge_bound(
+                            &mut upper_bounds,
+                            &mut conflicting_bounds,
+                            id,
+                            max,
+                            Ordering::Greater,
+                        );
                     }
                 }
 
@@ -439,6 +349,8 @@ pub fn parquet_to_datafile(
             }
         }
     }
+    lower_bounds.retain(|id, _| !conflicting_bounds.contains(id));
+    upper_bounds.retain(|id, _| !conflicting_bounds.contains(id));
     if derive_partition {
         let num_rows = file_metadata.file_metadata().num_rows();
         for (source_name, partition_field) in &partition_fields {
@@ -515,6 +427,30 @@ pub fn parquet_to_datafile(
 
     let content = builder.build()?;
     Ok(content)
+}
+
+/// Keeps the smaller (`keep == Ordering::Less`) or larger (`Ordering::Greater`)
+/// of the stored bound and `new`. Values of different types cannot be
+/// compared, so the column is marked and its bounds dropped later.
+fn merge_bound(
+    bounds: &mut HashMap<i32, Value>,
+    conflicting: &mut HashSet<i32>,
+    id: i32,
+    new: Value,
+    keep: Ordering,
+) {
+    match bounds.entry(id) {
+        Entry::Vacant(entry) => {
+            entry.insert(new);
+        }
+        Entry::Occupied(mut entry) => {
+            if std::mem::discriminant(entry.get()) != std::mem::discriminant(&new) {
+                conflicting.insert(id);
+            } else if new.cmp(entry.get()) == keep {
+                entry.insert(new);
+            }
+        }
+    }
 }
 
 /// Get parquet metadata size
@@ -987,6 +923,166 @@ mod metrics_mode_tests {
         )
         .unwrap();
         assert_eq!(datafile.partition().get("s"), Some(&None));
+    }
+
+    /// Writes each batch as its own row group; returns the data file.
+    fn datafile_from_row_groups(
+        schema: &Schema,
+        batches: Vec<RecordBatch>,
+    ) -> iceberg_rust_spec::spec::manifest::DataFile {
+        let mut buffer = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut buffer, batches[0].schema(), None).unwrap();
+        for batch in &batches {
+            writer.write(batch).unwrap();
+            writer.flush().unwrap();
+        }
+        writer.close().unwrap();
+        let size = buffer.len() as u64;
+        let reader = SerializedFileReader::new(bytes::Bytes::from(buffer)).unwrap();
+        assert_eq!(reader.metadata().num_row_groups(), batches.len());
+        parquet_to_datafile(
+            "/t/data/1.parquet",
+            size,
+            reader.metadata(),
+            schema,
+            &[],
+            None,
+            None,
+            &HashMap::new(),
+        )
+        .unwrap()
+    }
+
+    /// One nullable column `c` (field id 1) with one row group per array.
+    fn one_column(
+        ty: PrimitiveType,
+        arrays: Vec<ArrayRef>,
+    ) -> iceberg_rust_spec::spec::manifest::DataFile {
+        let schema = Schema::builder()
+            .with_struct_field(StructField::new(1, "c", false, Type::Primitive(ty), None))
+            .build()
+            .unwrap();
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "c",
+            arrays[0].data_type().clone(),
+            true,
+        )]));
+        let batches = arrays
+            .into_iter()
+            .map(|array| RecordBatch::try_new(arrow_schema.clone(), vec![array]).unwrap())
+            .collect();
+        datafile_from_row_groups(&schema, batches)
+    }
+
+    fn column_bounds(
+        datafile: &iceberg_rust_spec::spec::manifest::DataFile,
+    ) -> (Option<Value>, Option<Value>) {
+        (
+            datafile
+                .lower_bounds()
+                .as_ref()
+                .and_then(|b| b.get(&1).cloned()),
+            datafile
+                .upper_bounds()
+                .as_ref()
+                .and_then(|b| b.get(&1).cloned()),
+        )
+    }
+
+    #[test]
+    fn bounds_cover_every_row_group_for_every_type() {
+        use arrow::array::{BinaryArray, BooleanArray, Decimal128Array};
+        use iceberg_rust_spec::spec::decimal::decimal_from_i128_with_scale;
+
+        let strings = one_column(
+            PrimitiveType::String,
+            vec![
+                Arc::new(StringArray::from(vec!["m", "z"])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        );
+        assert_eq!(
+            column_bounds(&strings),
+            (
+                Some(Value::String("a".into())),
+                Some(Value::String("z".into()))
+            )
+        );
+
+        let decimal = |v: Vec<i128>| -> ArrayRef {
+            Arc::new(
+                Decimal128Array::from(v)
+                    .with_precision_and_scale(9, 2)
+                    .unwrap(),
+            )
+        };
+        let decimals = one_column(
+            PrimitiveType::Decimal {
+                precision: 9,
+                scale: 2,
+            },
+            vec![decimal(vec![500, 900]), decimal(vec![100, 200])],
+        );
+        assert_eq!(
+            column_bounds(&decimals),
+            (
+                Some(Value::Decimal(
+                    decimal_from_i128_with_scale(100, 2).unwrap()
+                )),
+                Some(Value::Decimal(
+                    decimal_from_i128_with_scale(900, 2).unwrap()
+                ))
+            )
+        );
+
+        let binaries = one_column(
+            PrimitiveType::Binary,
+            vec![
+                Arc::new(BinaryArray::from(vec![&[5u8][..], &[9u8][..]])),
+                Arc::new(BinaryArray::from(vec![&[1u8][..], &[2u8][..]])),
+            ],
+        );
+        assert_eq!(
+            column_bounds(&binaries),
+            (Some(Value::Binary(vec![1])), Some(Value::Binary(vec![9])))
+        );
+
+        let booleans = one_column(
+            PrimitiveType::Boolean,
+            vec![
+                Arc::new(BooleanArray::from(vec![true, true])),
+                Arc::new(BooleanArray::from(vec![false, false])),
+            ],
+        );
+        assert_eq!(
+            column_bounds(&booleans),
+            (Some(Value::Boolean(false)), Some(Value::Boolean(true)))
+        );
+    }
+
+    #[test]
+    fn long_string_bounds_still_cover_every_row_group() {
+        let high = format!("z{}", "y".repeat(100));
+        let low = format!("a{}", "b".repeat(100));
+        let datafile = one_column(
+            PrimitiveType::String,
+            vec![
+                Arc::new(StringArray::from(vec![high.as_str()])),
+                Arc::new(StringArray::from(vec![low.as_str()])),
+            ],
+        );
+        let (Some(Value::String(lower)), Some(Value::String(upper))) = column_bounds(&datafile)
+        else {
+            panic!("expected string bounds");
+        };
+        assert!(
+            lower.as_str() <= low.as_str(),
+            "lower bound {lower} above {low}"
+        );
+        assert!(
+            upper.as_str() >= high.as_str(),
+            "upper bound {upper} below {high}"
+        );
     }
 }
 
