@@ -323,6 +323,7 @@ async fn store_parquet_partitioned(
             &arrow_schema,
             partition_fields,
             partition_path,
+            &[],
             batches,
             object_store.clone(),
             equality_ids,
@@ -379,6 +380,7 @@ async fn store_parquet_partitioned(
                                 &partition_values,
                             )?)
                         };
+                        let partition_values = partition_values.clone();
                         async move {
                             let partition_fields =
                                 table_metadata::partition_fields(&partition_spec, &schema)
@@ -389,6 +391,7 @@ async fn store_parquet_partitioned(
                                 &arrow_schema,
                                 &partition_fields,
                                 partition_path,
+                                &partition_values,
                                 reciever,
                                 object_store.clone(),
                                 equality_ids.as_deref(),
@@ -453,6 +456,7 @@ async fn write_parquet_files(
     arrow_schema: &ArrowSchema,
     partition_fields: &[BoundPartitionField<'_>],
     partition_path: Option<String>,
+    partition_values: &[Option<Value>],
     batches: impl Stream<Item = Result<RecordBatch, ArrowError>> + Send,
     object_store: Arc<dyn ObjectStore>,
     equality_ids: Option<&[i32]>,
@@ -567,6 +571,7 @@ async fn write_parquet_files(
                     &metadata,
                     schema,
                     partition_fields,
+                    Some(partition_values),
                     equality_ids,
                     table_properties,
                 )?)

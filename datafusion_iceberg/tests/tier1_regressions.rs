@@ -204,3 +204,25 @@ async fn append_after_an_all_null_partition_manifest() {
         vec![5]
     );
 }
+
+#[tokio::test]
+async fn insert_identity_partition_on_a_long_string() {
+    let f = Fixture::new().await;
+    f.create_table(
+        "t",
+        vec![PartitionField::new(3, 1000, "s", Transform::Identity)],
+    )
+    .await;
+    let long = "x".repeat(100);
+    f.sql(&format!(
+        "INSERT INTO warehouse.test.t (id, s) VALUES (1, '{long}')"
+    ))
+    .await;
+    assert_eq!(
+        f.ids(&format!(
+            "SELECT id FROM warehouse.test.t WHERE s = '{long}'"
+        ))
+        .await,
+        vec![1]
+    );
+}
