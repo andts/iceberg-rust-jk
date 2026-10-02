@@ -4,12 +4,14 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{array::AsArray, datatypes::Int64Type, record_batch::RecordBatch},
+    arrow::{array::AsArray, datatypes::Int64Type, error::ArrowError, record_batch::RecordBatch},
     prelude::SessionContext,
 };
 use datafusion_iceberg::catalog::catalog::IcebergCatalog;
+use futures::stream;
 use iceberg_rust::{
-    catalog::{namespace::Namespace, Catalog},
+    arrow::write::write_equality_deletes_parquet_partitioned,
+    catalog::{identifier::Identifier, namespace::Namespace, tabular::Tabular, Catalog},
     object_store::ObjectStoreBuilder,
     spec::{
         partition::Transform,
@@ -248,5 +250,85 @@ async fn date_and_decimal_partitions_round_trip() {
         f.ids("SELECT id FROM warehouse.test.t WHERE d = DATE '2023-05-15'")
             .await,
         vec![1]
+    );
+}
+
+/// Writes the rows of `select` as an equality-delete file on `equality_ids`.
+async fn delete_where(f: &Fixture, table: &str, select: &str, equality_ids: &[i32]) {
+    let batches = f.sql(select).await;
+    let Tabular::Table(mut table) = f
+        .catalog
+        .clone()
+        .load_tabular(&Identifier::new(&["test".to_string()], table))
+        .await
+        .unwrap()
+    else {
+        panic!("{table} is not a table");
+    };
+    let files = write_equality_deletes_parquet_partitioned(
+        &table,
+        stream::iter(batches.into_iter().map(Ok::<_, ArrowError>)),
+        None,
+        equality_ids,
+    )
+    .await
+    .unwrap();
+    table
+        .new_transaction(None)
+        .append_delete(files)
+        .commit()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn limit_never_returns_equality_deleted_rows() {
+    let f = Fixture::new().await;
+    f.create_table("t", vec![]).await;
+    f.sql("INSERT INTO warehouse.test.t (id) VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10)")
+        .await;
+    // Physical order of the delete file: 10, 9, 1.
+    delete_where(
+        &f,
+        "t",
+        "SELECT id FROM warehouse.test.t WHERE id IN (1, 9, 10) ORDER BY id DESC",
+        &[1],
+    )
+    .await;
+    for limit in 1..=9 {
+        let ids = f
+            .ids(&format!("SELECT id FROM warehouse.test.t LIMIT {limit}"))
+            .await;
+        assert_eq!(ids.len(), limit.min(7), "LIMIT {limit} returned {ids:?}");
+        assert!(
+            ids.iter().all(|id| (2..=8).contains(id)),
+            "LIMIT {limit} returned {ids:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn equality_deletes_match_null_keys() {
+    let f = Fixture::new().await;
+    f.create_table("t", vec![]).await;
+    f.sql("INSERT INTO warehouse.test.t (id, n, s) VALUES (1, NULL, 'a'), (2, 2, 'b'), (3, NULL, 'c')")
+        .await;
+    // Two-column key (n, s) = (NULL, 'a') deletes only row 1.
+    delete_where(
+        &f,
+        "t",
+        "SELECT n, s FROM warehouse.test.t WHERE id = 1",
+        &[2, 3],
+    )
+    .await;
+    assert_eq!(
+        f.ids("SELECT id FROM warehouse.test.t ORDER BY id").await,
+        vec![2, 3]
+    );
+    // One-column key n = NULL deletes every remaining row with a NULL n.
+    delete_where(&f, "t", "SELECT n FROM warehouse.test.t WHERE id = 3", &[2]).await;
+    assert_eq!(
+        f.ids("SELECT id FROM warehouse.test.t ORDER BY id").await,
+        vec![2]
     );
 }
