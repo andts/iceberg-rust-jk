@@ -183,6 +183,9 @@ impl TryFrom<&DataType> for Type {
                 precision: *precision as u32,
                 scale: *scale as u32,
             })),
+            DataType::Decimal256(precision, _) if *precision > 38 => Err(Error::NotSupported(
+                format!("Arrow Decimal256 with precision {precision} exceeds Iceberg's maximum decimal precision of 38."),
+            )),
             DataType::Decimal256(precision, scale) => Ok(Type::Primitive(PrimitiveType::Decimal {
                 precision: *precision as u32,
                 scale: *scale as u32,
@@ -1055,6 +1058,22 @@ mod tests {
         let result: Result<StructType, Error> = (&arrow_schema).try_into();
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::NotSupported(_)));
+    }
+
+    #[test]
+    fn test_decimal256_precision_limit() {
+        // Iceberg decimals hold at most 38 digits.
+        assert_eq!(
+            Type::try_from(&DataType::Decimal256(38, 2)).unwrap(),
+            Type::Primitive(PrimitiveType::Decimal {
+                precision: 38,
+                scale: 2
+            })
+        );
+        assert!(matches!(
+            Type::try_from(&DataType::Decimal256(39, 2)),
+            Err(Error::NotSupported(_))
+        ));
     }
 
     #[test]
