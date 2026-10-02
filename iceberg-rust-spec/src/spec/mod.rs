@@ -28,6 +28,7 @@ pub mod snapshot;
 pub mod sort;
 pub mod table_metadata;
 pub mod tabular;
+pub mod transform;
 pub mod types;
 pub mod values;
 pub mod view_metadata;
