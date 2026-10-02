@@ -432,7 +432,7 @@ impl Catalog for RestCatalog {
         let Some(object_store) = self.cache.read().unwrap().get(&identifier).cloned() else {
             return Err(Error::NotFound(format!(
                 "Object store for table {}",
-                &identifier
+                identifier
             )));
         };
 
@@ -684,7 +684,11 @@ fn object_store_from_response(
     };
 
     let url = Url::parse(&response.metadata.location)?;
-    Ok(Some(object_store_from_config(url, config, default_object_store_builder)?))
+    Ok(Some(object_store_from_config(
+        url,
+        config,
+        default_object_store_builder,
+    )?))
 }
 
 #[cfg(test)]

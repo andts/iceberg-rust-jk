@@ -249,7 +249,7 @@ impl Catalog for GlueCatalog {
             .and_then(|parameter| parameter.get(METADATA_LOCATION))
             .ok_or(IcebergError::NotFound(format!(
                 "Glue table {} metadata location not found",
-                &table.name()
+                table.name()
             )))?;
 
         let version_id = table

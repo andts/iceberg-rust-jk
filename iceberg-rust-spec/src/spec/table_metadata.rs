@@ -467,7 +467,7 @@ impl fmt::Display for TableMetadata {
         write!(
             f,
             "{}",
-            &serde_json::to_string(self).map_err(|_| fmt::Error)?,
+            serde_json::to_string(self).map_err(|_| fmt::Error)?,
         )
     }
 }

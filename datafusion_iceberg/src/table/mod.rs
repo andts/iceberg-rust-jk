@@ -53,8 +53,8 @@ use datafusion::arrow::compute::SortOptions;
 use datafusion::common::{NullEquality, Statistics};
 use datafusion::datasource::physical_plan::FileScanConfig;
 use datafusion::parquet::arrow::RowNumber;
-use datafusion::physical_expr_adapter::PhysicalExprAdapterFactory;
 use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
+use datafusion::physical_expr_adapter::PhysicalExprAdapterFactory;
 use datafusion::physical_plan::empty::EmptyExec;
 use datafusion::physical_plan::ColumnStatistics;
 use datafusion::{

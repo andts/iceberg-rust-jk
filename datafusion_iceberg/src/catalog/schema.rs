@@ -29,9 +29,7 @@ fn strip_field_ids(fields: &Fields) -> Fields {
 
             let data_type = match field.data_type() {
                 DataType::Struct(child) => DataType::Struct(strip_field_ids(child)),
-                DataType::List(child) => {
-                    DataType::List(Arc::new(strip_single_field_id(child)))
-                }
+                DataType::List(child) => DataType::List(Arc::new(strip_single_field_id(child))),
                 DataType::LargeList(child) => {
                     DataType::LargeList(Arc::new(strip_single_field_id(child)))
                 }
@@ -135,20 +133,20 @@ impl SchemaProvider for IcebergSchema {
                     let mut all_batches = vec![];
                     for arc_inner_vec in mem_table.batches.iter() {
                         let inner_vec = arc_inner_vec.read().await;
-                        all_batches.extend(
-                            inner_vec
-                                .iter()
-                                .map(|x| Ok(x.clone())),
-                        );
+                        all_batches.extend(inner_vec.iter().map(|x| Ok(x.clone())));
                     }
 
                     let stream = futures::stream::iter(all_batches);
-                    let batch_stream: SendableRecordBatchStream = Box::pin(RecordBatchStreamAdapter::new(table.schema(), stream));
+                    let batch_stream: SendableRecordBatchStream =
+                        Box::pin(RecordBatchStreamAdapter::new(table.schema(), stream));
 
-                    let metadata_files =
-                        write_parquet_partitioned(&iceberg_table, batch_stream.map_err(ArrowError::from), None)
-                            .await
-                            .expect("write parquet files");
+                    let metadata_files = write_parquet_partitioned(
+                        &iceberg_table,
+                        batch_stream.map_err(ArrowError::from),
+                        None,
+                    )
+                    .await
+                    .expect("write parquet files");
 
                     iceberg_table
                         .new_transaction(None)
