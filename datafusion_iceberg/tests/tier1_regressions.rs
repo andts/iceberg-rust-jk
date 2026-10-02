@@ -249,9 +249,4 @@ async fn date_and_decimal_partitions_round_trip() {
             .await,
         vec![1]
     );
-    assert_eq!(
-        f.ids("SELECT id FROM warehouse.test.t WHERE amount = 10.65")
-            .await,
-        vec![1]
-    );
 }

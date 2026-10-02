@@ -108,6 +108,51 @@ pub fn i128_to_be_bytes_min(value: i128) -> Vec<u8> {
     bytes[start..].to_vec()
 }
 
+/// Returns the smallest byte count whose signed two's-complement range holds
+/// every unscaled value of a decimal with `precision` digits (`10^P - 1`).
+/// This is the Avro `fixed` size Iceberg uses for `decimal(P, S)`.
+#[must_use]
+pub(crate) fn decimal_required_bytes(precision: u32) -> usize {
+    let max_unscaled = 10u128.saturating_pow(precision) - 1;
+    (1..16)
+        .find(|bytes| max_unscaled < 1u128 << (8 * bytes - 1))
+        .unwrap_or(16)
+}
+
+/// Encodes `decimal` as the Avro `fixed` value of a `decimal(precision,
+/// scale)` column: the unscaled value at `scale` in big-endian two's
+/// complement, sign-extended to [`decimal_required_bytes`]`(precision)` bytes.
+///
+/// Fails if rescaling would drop non-zero digits or the value has more than
+/// `precision` digits (the same values the read side rejects).
+pub(crate) fn decimal_to_fixed_bytes(
+    decimal: &Decimal,
+    precision: u32,
+    scale: u32,
+) -> Result<Vec<u8>, Error> {
+    let error = || Error::Conversion(decimal.to_string(), format!("decimal({precision},{scale})"));
+    let mantissa = decimal_mantissa(decimal)?;
+    let value_scale = decimal_scale(decimal);
+    let unscaled = if scale >= value_scale {
+        10i128
+            .checked_pow(scale - value_scale)
+            .and_then(|factor| mantissa.checked_mul(factor))
+    } else {
+        10i128
+            .checked_pow(value_scale - scale)
+            .filter(|divisor| mantissa % divisor == 0)
+            .map(|divisor| mantissa / divisor)
+    }
+    .ok_or_else(error)?;
+    let max_unscaled = 10u128.checked_pow(precision).ok_or_else(error)? - 1;
+    if unscaled.unsigned_abs() > max_unscaled {
+        return Err(error());
+    }
+    // `max_unscaled` fits in `size` bytes, so `unscaled` does too.
+    let size = decimal_required_bytes(precision);
+    Ok(unscaled.to_be_bytes()[16 - size..].to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +227,58 @@ mod tests {
                 i128_to_be_bytes_min(value)
             );
         }
+    }
+
+    #[test]
+    fn required_bytes_match_iceberg_java() {
+        // Values of org.apache.iceberg.types.TypeUtil.decimalRequiredBytes.
+        let expected = [
+            (1, 1),
+            (2, 1),
+            (3, 2),
+            (4, 2),
+            (9, 4),
+            (10, 5),
+            (18, 8),
+            (19, 9),
+            (38, 16),
+        ];
+        for (precision, bytes) in expected {
+            assert_eq!(
+                decimal_required_bytes(precision),
+                bytes,
+                "precision {precision}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_bytes_are_sign_extended_at_the_column_scale() {
+        let decimal = |m, s| decimal_from_i128_with_scale(m, s).unwrap();
+        assert_eq!(
+            decimal_to_fixed_bytes(&decimal(-1050, 2), 9, 2).unwrap(),
+            vec![0xff, 0xff, 0xfb, 0xe6]
+        );
+        assert_eq!(
+            decimal_to_fixed_bytes(&decimal(5, 0), 3, 2).unwrap(),
+            vec![0x01, 0xf4]
+        );
+        assert_eq!(
+            decimal_to_fixed_bytes(&decimal(1500, 3), 3, 2).unwrap(),
+            vec![0x00, 0x96]
+        );
+        assert_eq!(
+            decimal_to_fixed_bytes(&decimal(-128, 0), 3, 0).unwrap(),
+            vec![0xff, 0x80]
+        );
+        assert_eq!(
+            decimal_to_fixed_bytes(&decimal(99, 0), 2, 0).unwrap(),
+            vec![0x63]
+        );
+        // Rescaling would drop a digit.
+        assert!(decimal_to_fixed_bytes(&decimal(1501, 3), 3, 2).is_err());
+        // More digits than the precision, though it would fit in the bytes.
+        assert!(decimal_to_fixed_bytes(&decimal(100, 0), 2, 0).is_err());
+        assert!(decimal_to_fixed_bytes(&decimal(-1000, 2), 3, 2).is_err());
     }
 }
