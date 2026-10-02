@@ -9,24 +9,40 @@ use std::collections::HashMap;
 use crate::{
     error::Error,
     table::manifest_list::{append_manifest, ManifestListReader, RowIdAssigner},
-    util::{cmp_with_priority, partition_struct_to_vec, summary_to_rectangle, try_sub, Rectangle},
+    util::{cmp_with_priority, partition_struct_to_vec, summary_bounds, try_sub, Rectangle},
 };
 
 /// Split sets of datafiles depending on their partition_values
+///
+/// An empty rectangle, or an entry with a null partition value (which has no
+/// position in the rectangle), splits by count instead.
 #[allow(clippy::type_complexity)]
 fn split_datafiles_once(
     files: impl Iterator<Item = Result<ManifestEntry, Error>>,
     rect: Rectangle,
     names: &[&str],
 ) -> Result<[(Vec<ManifestEntry>, Rectangle); 2], Error> {
-    if let Ordering::Equal = cmp_with_priority(&rect.min, &rect.max)? {
-        let mut smaller = files.collect::<Result<Vec<_>, Error>>()?;
+    let count_split = |entries: Vec<ManifestEntry>| {
+        let mut smaller = entries;
         let larger = smaller.split_off(smaller.len() / 2);
-
-        return Ok([
+        [
             (smaller, Rectangle::new(SmallVec::new(), SmallVec::new())),
             (larger, Rectangle::new(SmallVec::new(), SmallVec::new())),
-        ]);
+        ]
+    };
+
+    let entries = files.collect::<Result<Vec<_>, Error>>()?;
+
+    if cmp_with_priority(&rect.min, &rect.max)? == Ordering::Equal {
+        return Ok(count_split(entries));
+    }
+
+    let mut positions = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        match partition_struct_to_vec(entry.data_file().partition(), names)? {
+            Some(position) => positions.push(position),
+            None => return Ok(count_split(entries)),
+        }
     }
 
     let mut smaller = Vec::new();
@@ -34,9 +50,7 @@ fn split_datafiles_once(
     let mut smaller_rect = None;
     let mut larger_rect = None;
 
-    for manifest_entry in files {
-        let manifest_entry = manifest_entry?;
-        let position = partition_struct_to_vec(manifest_entry.data_file().partition(), names)?;
+    for (manifest_entry, position) in entries.into_iter().zip(positions) {
         // Compare distance to upper and lower bound. Since you can't compute a "norm" for a multidimensional vector where the dimensions have different datatypes,
         // the dimensions are compared individually and the norm is computed by weighing the earlier columns more than the later.
         if let Ordering::Greater = cmp_with_priority(
@@ -110,7 +124,8 @@ pub(crate) fn split_datafiles(
 }
 
 pub(crate) struct SelectedManifest {
-    pub data_manifest: ManifestListEntry,
+    /// `None` if no existing manifest can take the new files.
+    pub data_manifest: Option<ManifestListEntry>,
     pub delete_manifest: Option<ManifestListEntry>,
     pub file_count_all_entries: usize,
 }
@@ -129,15 +144,24 @@ pub(crate) fn select_manifest_partitioned(
     for manifest_res in manifest_list_reader {
         let manifest = manifest_res?;
 
-        let mut bounds =
-            summary_to_rectangle(manifest.partitions.as_ref().ok_or(Error::NotFound(format!(
-                "Partition struct in manifest {}",
-                manifest.manifest_path
-            )))?)?;
-
-        bounds.expand(bounding_partition_values);
+        let summaries = manifest.partitions.as_ref().ok_or(Error::NotFound(format!(
+            "Partition struct in manifest {}",
+            manifest.manifest_path
+        )))?;
 
         file_count_all_entries += manifest.added_files_count.unwrap_or(0) as usize;
+
+        // A manifest without bounds (all-null partition column) can't be compared.
+        let Some(mut bounds) = summary_bounds(summaries) else {
+            append_manifest(
+                manifest_list_writer,
+                row_id_assigner.as_deref_mut(),
+                manifest,
+            )?;
+            continue;
+        };
+
+        bounds.expand(bounding_partition_values);
 
         match manifest.content {
             iceberg_rust_spec::manifest_list::Content::Data => {
@@ -206,11 +230,8 @@ pub(crate) fn select_manifest_partitioned(
             }
         }
     }
-    let (_, data_manifest) =
-        selected_data_state.ok_or(Error::NotFound("Manifest for insert".to_owned()))?;
-
     Ok(SelectedManifest {
-        data_manifest,
+        data_manifest: selected_data_state.map(|(_, x)| x),
         delete_manifest: selected_delete_state.map(|(_, x)| x),
         file_count_all_entries,
     })
@@ -304,7 +325,7 @@ pub(crate) fn select_manifest_unpartitioned(
         selected_data_state.ok_or(Error::NotFound("Manifest for insert".to_owned()))?;
 
     Ok(SelectedManifest {
-        data_manifest,
+        data_manifest: Some(data_manifest),
         delete_manifest: selected_delete_state.map(|(_, x)| x),
         file_count_all_entries,
     })
@@ -344,13 +365,21 @@ mod split_tests {
 
     /// Build a manifest entry sitting at partition `day = value`.
     fn entry_at(day: i32) -> ManifestEntry {
+        entry_with(Some(day))
+    }
+
+    fn null_entry() -> ManifestEntry {
+        entry_with(None)
+    }
+
+    fn entry_with(day: Option<i32>) -> ManifestEntry {
         let data_file = DataFile::builder()
             .with_content(Content::Data)
-            .with_file_path(format!("s3://bucket/day={day}/data.parquet"))
+            .with_file_path(format!("s3://bucket/day={day:?}/data.parquet"))
             .with_file_format(FileFormat::Parquet)
             .with_partition(Struct::from_iter(vec![(
                 "day".to_owned(),
-                Some(Value::Int(day)),
+                day.map(Value::Int),
             )]))
             .with_record_count(1)
             .with_file_size_in_bytes(1024)
@@ -376,6 +405,21 @@ mod split_tests {
     /// A rectangle spanning `day` in [min, max].
     fn rect(min: i32, max: i32) -> Rectangle {
         Rectangle::new(smallvec![Value::Int(min)], smallvec![Value::Int(max)])
+    }
+
+    #[test]
+    fn null_partition_entry_splits_by_count() {
+        let files = vec![
+            Ok(entry_at(1)),
+            Ok(null_entry()),
+            Ok(entry_at(2)),
+            Ok(entry_at(3)),
+        ];
+
+        let [(smaller, _), (larger, _)] =
+            split_datafiles_once(files.into_iter(), rect(0, 100), &["day"]).unwrap();
+
+        assert_eq!((smaller.len(), larger.len()), (2, 2));
     }
 
     /// Regression: every entry clustering on one side of the split used to

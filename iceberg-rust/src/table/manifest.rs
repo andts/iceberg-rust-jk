@@ -804,6 +804,9 @@ fn update_partitions(
 ) -> Result<(), Error> {
     for (field, summary) in partition_columns.iter().zip(partitions.iter_mut()) {
         let value = partition_values.get(field.name()).and_then(|x| x.as_ref());
+        if value.is_none() {
+            summary.contains_null = true;
+        }
         if let Some(value) = value {
             if summary.lower_bound.is_none() {
                 summary.lower_bound = Some(value.clone());
@@ -1131,5 +1134,44 @@ mod tests {
     #[ignore = "Avro features beyond manifest read/write: data + delete writers, enums, options-with-non-null-defaults, file split, name mapping, build/read projection, schema projection, single-message encoding, decoder resolver, read projection, read default values"]
     fn test_avro_features_suite_scenarios(#[case] _scenario: usize) {
         unimplemented!("Avro features suite");
+    }
+}
+
+#[cfg(test)]
+mod partition_summary_tests {
+    use iceberg_rust_spec::{
+        manifest_list::FieldSummary,
+        partition::{PartitionField, Transform},
+        values::{Struct, Value},
+    };
+
+    use super::update_partitions;
+
+    #[test]
+    fn null_partition_value_sets_contains_null() {
+        let fields = [PartitionField::new(1, 1000, "n", Transform::Identity)];
+        let mut summaries = [FieldSummary {
+            contains_null: false,
+            contains_nan: None,
+            lower_bound: None,
+            upper_bound: None,
+        }];
+
+        update_partitions(
+            &mut summaries,
+            &Struct::from_iter([("n".to_owned(), Some(Value::LongInt(3)))]),
+            &fields,
+        )
+        .unwrap();
+        assert!(!summaries[0].contains_null);
+
+        update_partitions(
+            &mut summaries,
+            &Struct::from_iter([("n".to_owned(), None)]),
+            &fields,
+        )
+        .unwrap();
+        assert!(summaries[0].contains_null);
+        assert_eq!(summaries[0].lower_bound, Some(Value::LongInt(3)));
     }
 }

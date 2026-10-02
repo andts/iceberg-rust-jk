@@ -333,7 +333,7 @@ async fn store_parquet_partitioned(
         Ok(files)
     } else {
         let table_properties = Arc::new(metadata.properties.clone());
-        let mut senders: LruCache<Vec<Value>, Sender<Result<RecordBatch, ArrowError>>> =
+        let mut senders: LruCache<Vec<Option<Value>>, Sender<Result<RecordBatch, ArrowError>>> =
             LruCache::unbounded();
 
         let mut set = JoinSet::new();
@@ -595,14 +595,16 @@ async fn write_parquet_files(
 #[inline]
 pub fn generate_partition_path(
     partition_fields: &[BoundPartitionField<'_>],
-    partition_values: &[Value],
+    partition_values: &[Option<Value>],
 ) -> Result<String, ArrowError> {
     partition_fields
         .iter()
         .zip(partition_values.iter())
         .map(|(field, value)| {
-            let name = field.name().to_owned();
-            Ok(name + "=" + &value.to_string() + "/")
+            let value = value
+                .as_ref()
+                .map_or_else(|| "null".to_owned(), ToString::to_string);
+            Ok(field.name().to_owned() + "=" + &value + "/")
         })
         .collect::<Result<String, ArrowError>>()
 }
@@ -1493,11 +1495,28 @@ mod tests {
         };
         let partfield = PartitionField::new(1, 1001, "month", Transform::Month);
         let partition_fields = vec![BoundPartitionField::new(&partfield, &field)];
-        let partition_values = vec![Value::Int(10)];
+        let partition_values = vec![Some(Value::Int(10))];
 
         let result = super::generate_partition_path(&partition_fields, &partition_values);
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "month=10/");
+    }
+
+    #[test]
+    fn partition_path_renders_null_values() {
+        let source = StructField::new(
+            1,
+            "n",
+            false,
+            Type::Primitive(iceberg_rust_spec::types::PrimitiveType::Long),
+            None,
+        );
+        let field = PartitionField::new(1, 1000, "n", Transform::Identity);
+        let fields = [BoundPartitionField::new(&field, &source)];
+        assert_eq!(
+            super::generate_partition_path(&fields, &[None]).unwrap(),
+            "n=null/"
+        );
     }
 }
