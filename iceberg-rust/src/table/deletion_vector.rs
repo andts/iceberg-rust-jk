@@ -15,9 +15,9 @@ use iceberg_rust_spec::{
     spec::{deletion_vector::DeletionVector, manifest::ManifestEntry},
     util,
 };
-use object_store::{path::Path, ObjectStore, ObjectStoreExt};
+use object_store::{ObjectStore, ObjectStoreExt};
 
-use crate::error::Error;
+use crate::{error::Error, object_store::store::path_from_location};
 
 /// Fetch every deletion vector referenced by `entries` and return them keyed
 /// by the absolute path of the data file each vector applies to.
@@ -93,7 +93,8 @@ async fn fetch_one(
     // `dv_index.get(strip_prefix(data_file.file_path()))` — finds this entry
     // even when writer normalization differs from reader normalization
     // (e.g. scheme variations or trailing slashes).
-    let puffin_path: Path = util::strip_prefix(data_file.file_path()).into();
+    let puffin_path =
+        path_from_location(data_file.file_path()).map_err(|err| Error::External(Box::new(err)))?;
     let bytes = object_store.get_range(&puffin_path, range).await?;
     let vector = DeletionVector::try_from(bytes.as_ref())?;
     Ok((util::strip_prefix(&referenced), vector))
@@ -116,6 +117,7 @@ mod tests {
     use roaring::RoaringTreemap;
 
     use super::load_deletion_vectors;
+    use crate::object_store::store::path_from_location;
 
     fn make_entry(puffin_path: &str, referenced: &str, offset: i64, size: i64) -> ManifestEntry {
         let data_file = DataFileBuilder::default()
@@ -181,7 +183,10 @@ mod tests {
         }
         let bytes = writer.finish().unwrap();
         store
-            .put(&Path::from(path), PutPayload::from(bytes.clone()))
+            .put(
+                &path_from_location(path).unwrap(),
+                PutPayload::from(bytes.clone()),
+            )
             .await
             .unwrap();
         // Re-read the footer to get the authoritative (offset, length) tuples.
@@ -201,6 +206,33 @@ mod tests {
         assert_eq!(index.len(), 1);
         let loaded = index.get("/data/f1.parquet").unwrap();
         assert_eq!(*loaded, dv);
+    }
+
+    #[tokio::test]
+    async fn reads_puffin_at_percent_encoded_location() {
+        // Trino writes partition values percent-encoded into the object key
+        // itself; the manifest location must map to that literal key.
+        let store = Arc::new(InMemory::new());
+        let dv = dv_from(&[7]);
+        let location = "s3://bucket/dvs/p_brand=Brand%2315/a.puffin";
+        let blobs = write_puffin(&*store, location, &[&dv]).await;
+        assert!(store
+            .head(&Path::parse("dvs/p_brand=Brand%2315/a.puffin").unwrap())
+            .await
+            .is_ok());
+        let (offset, size) = blobs[0];
+        let entry = make_entry(
+            location,
+            "s3://bucket/data/p_brand=Brand%2315/a.parquet",
+            offset,
+            size,
+        );
+
+        let index = load_deletion_vectors(&[entry], store).await.unwrap();
+        assert_eq!(
+            *index.get("/data/p_brand=Brand%2315/a.parquet").unwrap(),
+            dv
+        );
     }
 
     #[tokio::test]

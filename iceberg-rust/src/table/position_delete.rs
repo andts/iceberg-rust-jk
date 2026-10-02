@@ -12,11 +12,11 @@ use iceberg_rust_spec::{
     },
     util,
 };
-use object_store::{path::Path, ObjectStore};
+use object_store::ObjectStore;
 use parquet::arrow::{async_reader::ParquetRecordBatchStreamBuilder, ProjectionMask};
 use roaring::RoaringTreemap;
 
-use crate::{arrow::read::DataFileReader, error::Error};
+use crate::{arrow::read::DataFileReader, error::Error, object_store::store::path_from_location};
 
 const FILE_PATH_FIELD_ID: i32 = i32::MAX - 101;
 const POSITION_FIELD_ID: i32 = i32::MAX - 102;
@@ -84,7 +84,7 @@ async fn load_one_position_delete_file(
 
     let reader = DataFileReader::new(
         object_store,
-        Path::from(util::strip_prefix(data_file.file_path())),
+        path_from_location(data_file.file_path()).map_err(|err| Error::External(Box::new(err)))?,
         file_size,
     );
     let builder = ParquetRecordBatchStreamBuilder::new(reader).await?;
@@ -249,6 +249,7 @@ mod tests {
     use parquet::arrow::{ArrowWriter, PARQUET_FIELD_ID_META_KEY};
 
     use super::{delete_applies, load_position_deletes, FILE_PATH_FIELD_ID, POSITION_FIELD_ID};
+    use crate::object_store::store::path_from_location;
 
     fn position_delete_parquet(rows: &[(&str, i64)]) -> Vec<u8> {
         let schema = Arc::new(Schema::new(vec![
@@ -289,7 +290,7 @@ mod tests {
         let bytes = position_delete_parquet(rows);
         let file_size = i64::try_from(bytes.len()).unwrap();
         store
-            .put(&Path::from(path), PutPayload::from(bytes))
+            .put(&path_from_location(path).unwrap(), PutPayload::from(bytes))
             .await
             .unwrap();
         let data_file = DataFileBuilder::default()
@@ -367,5 +368,33 @@ mod tests {
         assert!(!index["/data/a.parquet"].is_deleted(1));
         assert!(index["/data/a.parquet"].is_deleted(2));
         assert!(index["/data/b.parquet"].is_deleted(3));
+    }
+
+    #[tokio::test]
+    async fn reads_delete_file_at_percent_encoded_location() {
+        // Trino writes partition values percent-encoded into the object key
+        // itself; the manifest location must map to that literal key.
+        let store = Arc::new(InMemory::new());
+        let entry = write_delete_entry(
+            store.as_ref(),
+            "s3://bucket/deletes/p_brand=Brand%2315/d.parquet",
+            7,
+            &[("s3://bucket/data/p_brand=Brand%2315/a.parquet", 2)],
+        )
+        .await;
+        assert!(store
+            .head(&Path::parse("deletes/p_brand=Brand%2315/d.parquet").unwrap())
+            .await
+            .is_ok());
+        let active = Arc::new(HashMap::from([(
+            "/data/p_brand=Brand%2315/a.parquet".to_string(),
+            Some(7),
+        )]));
+
+        let index = load_position_deletes(vec![entry], active, store)
+            .await
+            .unwrap();
+
+        assert!(index["/data/p_brand=Brand%2315/a.parquet"].is_deleted(2));
     }
 }
