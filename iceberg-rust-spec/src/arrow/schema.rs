@@ -160,12 +160,14 @@ impl TryFrom<&DataType> for Type {
             DataType::Int8 | DataType::Int16 | DataType::Int32 => {
                 Ok(Type::Primitive(PrimitiveType::Int))
             }
-            DataType::UInt8 | DataType::UInt16 => {
-                Ok(Type::Primitive(PrimitiveType::Int))
-            }
-            DataType::UInt32 => {
-                Ok(Type::Primitive(PrimitiveType::Long))
-            }
+            // Iceberg has no unsigned types: widen each to the narrowest signed
+            // type that holds its full range. u64::MAX has 20 digits.
+            DataType::UInt8 | DataType::UInt16 => Ok(Type::Primitive(PrimitiveType::Int)),
+            DataType::UInt32 => Ok(Type::Primitive(PrimitiveType::Long)),
+            DataType::UInt64 => Ok(Type::Primitive(PrimitiveType::Decimal {
+                precision: 20,
+                scale: 0,
+            })),
             DataType::Int64 => Ok(Type::Primitive(PrimitiveType::Long)),
             DataType::Float32 => Ok(Type::Primitive(PrimitiveType::Float)),
             DataType::Float64 => Ok(Type::Primitive(PrimitiveType::Double)),
@@ -1058,34 +1060,45 @@ mod tests {
     #[test]
     fn test_arrow_schema_to_struct_type_uint_types() {
         let arrow_schema = ArrowSchema::new(vec![
-            Field::new("field1", DataType::UInt8, false)
-                .with_metadata(HashMap::from([(
-                    PARQUET_FIELD_ID_META_KEY.to_string(),
-                    "1".to_string(),
-                )])),
-            Field::new("field2", DataType::UInt16, false)
-                .with_metadata(HashMap::from([(
-                    PARQUET_FIELD_ID_META_KEY.to_string(),
-                    "2".to_string(),
-                )])),
-            Field::new("field3", DataType::UInt32, false)
-                .with_metadata(HashMap::from([(
-                    PARQUET_FIELD_ID_META_KEY.to_string(),
-                    "3".to_string(),
-                )])),
-            Field::new("field4", DataType::UInt64, false)
-                .with_metadata(HashMap::from([(
-                    PARQUET_FIELD_ID_META_KEY.to_string(),
-                    "4".to_string(),
-                )])),
+            Field::new("field1", DataType::UInt8, false).with_metadata(HashMap::from([(
+                PARQUET_FIELD_ID_META_KEY.to_string(),
+                "1".to_string(),
+            )])),
+            Field::new("field2", DataType::UInt16, false).with_metadata(HashMap::from([(
+                PARQUET_FIELD_ID_META_KEY.to_string(),
+                "2".to_string(),
+            )])),
+            Field::new("field3", DataType::UInt32, false).with_metadata(HashMap::from([(
+                PARQUET_FIELD_ID_META_KEY.to_string(),
+                "3".to_string(),
+            )])),
+            Field::new("field4", DataType::UInt64, false).with_metadata(HashMap::from([(
+                PARQUET_FIELD_ID_META_KEY.to_string(),
+                "4".to_string(),
+            )])),
         ]);
 
         let struct_type: StructType = (&arrow_schema).try_into().unwrap();
-        
-        assert_eq!(struct_type[0].field_type, Type::Primitive(PrimitiveType::Int));
-        assert_eq!(struct_type[1].field_type, Type::Primitive(PrimitiveType::Int));
-        assert_eq!(struct_type[2].field_type, Type::Primitive(PrimitiveType::Int));
-        assert_eq!(struct_type[3].field_type, Type::Primitive(PrimitiveType::Long));
+
+        assert_eq!(
+            struct_type[0].field_type,
+            Type::Primitive(PrimitiveType::Int)
+        );
+        assert_eq!(
+            struct_type[1].field_type,
+            Type::Primitive(PrimitiveType::Int)
+        );
+        assert_eq!(
+            struct_type[2].field_type,
+            Type::Primitive(PrimitiveType::Long)
+        );
+        assert_eq!(
+            struct_type[3].field_type,
+            Type::Primitive(PrimitiveType::Decimal {
+                precision: 20,
+                scale: 0
+            })
+        );
     }
 
     #[test]

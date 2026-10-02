@@ -45,7 +45,12 @@ use std::{fmt::Write, thread::available_parallelism};
 use tokio::task::JoinSet;
 use tracing::instrument;
 
-use arrow::{datatypes::Schema as ArrowSchema, error::ArrowError, record_batch::RecordBatch};
+use arrow::{
+    compute::{cast_with_options, CastOptions},
+    datatypes::{DataType, Schema as ArrowSchema},
+    error::ArrowError,
+    record_batch::RecordBatch,
+};
 use futures::Stream;
 use iceberg_rust_spec::{
     partition::BoundPartitionField,
@@ -295,6 +300,12 @@ async fn store_parquet_partitioned(
 
     let arrow_schema: Arc<ArrowSchema> =
         Arc::new((schema.fields()).try_into().map_err(Error::from)?);
+
+    let batches = {
+        let arrow_schema = arrow_schema.clone();
+        batches
+            .map(move |batch| batch.and_then(|batch| widen_unsigned_columns(batch, &arrow_schema)))
+    };
 
     if partition_fields.is_empty() {
         let partition_path = if metadata
@@ -974,6 +985,73 @@ pub fn generate_file_path(data_location: &str, partition_path: Option<String>) -
         "/"
     };
     base + separator + &path + &Uuid::now_v1(&rand).to_string() + ".parquet"
+}
+
+/// Cast columns holding unsigned integers to the table's Arrow types.
+///
+/// Iceberg has no unsigned types, so an unsigned Arrow column maps to a wider
+/// signed Iceberg type (see `TryFrom<&DataType> for Type`), but the Parquet
+/// writer rejects a batch whose column types differ from the table schema.
+/// Widening is lossless, so the cast cannot fail on in-range data; any other
+/// column is passed through unchanged.
+fn widen_unsigned_columns(
+    batch: RecordBatch,
+    arrow_schema: &Arc<ArrowSchema>,
+) -> Result<RecordBatch, ArrowError> {
+    if batch.num_columns() != arrow_schema.fields().len()
+        || !batch
+            .schema()
+            .fields()
+            .iter()
+            .any(|field| contains_unsigned(field.data_type()))
+    {
+        return Ok(batch);
+    }
+    let options = CastOptions {
+        safe: false,
+        ..Default::default()
+    };
+    let columns = batch
+        .columns()
+        .iter()
+        .zip(arrow_schema.fields())
+        .map(|(column, field)| {
+            if contains_unsigned(column.data_type()) {
+                cast_with_options(column, field.data_type(), &options)
+            } else {
+                Ok(column.clone())
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let fields = batch
+        .schema()
+        .fields()
+        .iter()
+        .zip(&columns)
+        .map(|(field, column)| {
+            Arc::new(
+                field
+                    .as_ref()
+                    .clone()
+                    .with_data_type(column.data_type().clone()),
+            )
+        })
+        .collect::<Vec<_>>();
+    RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns)
+}
+
+fn contains_unsigned(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => true,
+        DataType::Struct(fields) => fields.iter().any(|f| contains_unsigned(f.data_type())),
+        DataType::List(field)
+        | DataType::LargeList(field)
+        | DataType::ListView(field)
+        | DataType::LargeListView(field)
+        | DataType::FixedSizeList(field, _)
+        | DataType::Map(field, _) => contains_unsigned(field.data_type()),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
