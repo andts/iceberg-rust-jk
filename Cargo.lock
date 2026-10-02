@@ -2614,6 +2614,7 @@ dependencies = [
  "itertools 0.14.0",
  "lru",
  "object_store",
+ "ordered-float 5.5.0",
  "parquet",
  "pin-project-lite",
  "pyo3",

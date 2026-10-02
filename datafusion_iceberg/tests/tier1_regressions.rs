@@ -332,3 +332,125 @@ async fn equality_deletes_match_null_keys() {
         vec![2]
     );
 }
+
+/// One row per table. The third row is all-null apart from `id`.
+const ROWS: [&str; 3] = [
+    "(1, 15, 'abcdef', DATE '2023-05-15', TIMESTAMP '2023-05-15 12:00:00', 10.65)",
+    "(1, -1, 'éa', DATE '1969-12-31', TIMESTAMP '1969-12-31 23:59:59', -0.01)",
+    "(1, NULL, NULL, NULL, NULL, NULL)",
+];
+
+const FILTERS: [&str; 46] = [
+    "n = 15",
+    "n = 14",
+    "n < 15",
+    "n <= 15",
+    "n > 15",
+    "n >= 15",
+    "n < 20",
+    "n > 10",
+    "n < -1",
+    "n <= -1",
+    "n > -5",
+    "n != 15",
+    "n IN (14, 15)",
+    "n IS NULL",
+    "n IS NOT NULL",
+    "20 > n",
+    "s = 'abcdef'",
+    "s = 'abz'",
+    "s < 'abd'",
+    "s > 'ab'",
+    "s IN ('abcdef', 'x')",
+    "s = 'éa'",
+    "d = DATE '2023-05-15'",
+    "d < DATE '2023-05-16'",
+    "d > DATE '2023-05-14'",
+    "d >= DATE '2023-05-15'",
+    "d != DATE '2023-05-01'",
+    "d < DATE '1970-01-01'",
+    "d = DATE '1969-12-31'",
+    "ts > TIMESTAMP '2023-05-15 10:00:00'",
+    "ts < TIMESTAMP '2023-05-15 14:00:00'",
+    "ts >= TIMESTAMP '2023-05-15 12:00:00'",
+    "ts <= TIMESTAMP '2023-05-15 12:00:00'",
+    "ts = TIMESTAMP '2023-05-15 12:00:00'",
+    "ts != TIMESTAMP '2023-05-15 13:00:00'",
+    "ts < TIMESTAMP '1970-01-01 00:00:00'",
+    "ts > TIMESTAMP '1969-12-31 23:00:00'",
+    "amount = 10.65",
+    "amount < 10.70",
+    "amount > 10.60",
+    "amount = -0.01",
+    "amount < 0",
+    "n = 99 OR ts > TIMESTAMP '2023-05-15 10:00:00'",
+    "NOT (n < 10)",
+    "n + 0 = 15",
+    "n = 15 AND s = 'abcdef'",
+];
+
+fn partition_fields_under_test() -> Vec<PartitionField> {
+    vec![
+        PartitionField::new(2, 1000, "n_identity", Transform::Identity),
+        PartitionField::new(2, 1000, "n_bucket", Transform::Bucket(4)),
+        PartitionField::new(2, 1000, "n_trunc", Transform::Truncate(10)),
+        PartitionField::new(3, 1000, "s_trunc", Transform::Truncate(2)),
+        PartitionField::new(3, 1000, "s_bucket", Transform::Bucket(4)),
+        PartitionField::new(4, 1000, "d_year", Transform::Year),
+        PartitionField::new(4, 1000, "d_month", Transform::Month),
+        PartitionField::new(4, 1000, "d_day", Transform::Day),
+        PartitionField::new(4, 1000, "d_bucket", Transform::Bucket(4)),
+        PartitionField::new(5, 1000, "ts_year", Transform::Year),
+        PartitionField::new(5, 1000, "ts_month", Transform::Month),
+        PartitionField::new(5, 1000, "ts_day", Transform::Day),
+        PartitionField::new(5, 1000, "ts_hour", Transform::Hour),
+        PartitionField::new(5, 1000, "ts_bucket", Transform::Bucket(4)),
+        PartitionField::new(6, 1000, "amount_trunc", Transform::Truncate(50)),
+        PartitionField::new(6, 1000, "amount_bucket", Transform::Bucket(4)),
+    ]
+}
+
+/// Each table holds one row in one partition, so a wrong projection prunes
+/// its only manifest. An unpartitioned copy gives the expected answer.
+#[tokio::test]
+async fn partition_pruning_never_changes_results() {
+    let f = Fixture::new().await;
+    let insert = |table: &str, row: &str| {
+        format!("INSERT INTO warehouse.test.{table} (id, n, s, d, ts, amount) VALUES {row}")
+    };
+    let mut failures = Vec::new();
+    for (row_index, row) in ROWS.iter().enumerate() {
+        let unpartitioned = format!("u{row_index}");
+        f.create_table(&unpartitioned, vec![]).await;
+        f.sql(&insert(&unpartitioned, row)).await;
+        for (field_index, field) in partition_fields_under_test().into_iter().enumerate() {
+            let table = format!("p{row_index}_{field_index}");
+            let label = format!("{field:?}");
+            f.create_table(&table, vec![field]).await;
+            f.sql(&insert(&table, row)).await;
+            for filter in FILTERS {
+                let expected = f
+                    .try_ids(&format!(
+                        "SELECT id FROM warehouse.test.{unpartitioned} WHERE {filter}"
+                    ))
+                    .await;
+                let actual = f
+                    .try_ids(&format!(
+                        "SELECT id FROM warehouse.test.{table} WHERE {filter}"
+                    ))
+                    .await;
+                if expected != actual {
+                    failures.push(format!(
+                        "{label}, row {row}, `{filter}`: expected {expected:?}, got {actual:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} mismatches:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}

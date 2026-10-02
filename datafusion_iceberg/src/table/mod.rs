@@ -42,12 +42,13 @@ use std::{
 use tokio::sync::mpsc::{self};
 use tracing::{instrument, Instrument};
 
+use crate::partition_projection::project;
 use crate::partition_value::value_to_scalar;
 use crate::statistics::statistics_from_datafiles;
 use crate::table::expr_adapter::IcebergPhysicalExprAdapterFactory;
 use crate::{
     error::Error as DataFusionIcebergError,
-    pruning_statistics::{transform_predicate, PruneDataFiles, PruneManifests},
+    pruning_statistics::{PruneDataFiles, PruneManifests},
     statistics::manifest_statistics,
 };
 use datafusion::arrow::compute::SortOptions;
@@ -631,25 +632,10 @@ async fn table_scan(
         physical_predicate.clone()
     {
         let partition_schema = Arc::new(ArrowSchema::new(table_partition_cols.clone()));
-        let partition_column_names = partition_fields
-            .iter()
-            .map(|field| Ok(field.source_name().to_owned()))
-            .collect::<Result<HashSet<_>, Error>>()
-            .map_err(DataFusionIcebergError::from)?;
-
         let partition_predicates = conjunction(
             filters
                 .iter()
-                .filter(|expr| {
-                    let set: HashSet<String> = expr
-                        .column_refs()
-                        .into_iter()
-                        .map(|x| x.name.clone())
-                        .collect();
-                    set.is_subset(&partition_column_names)
-                })
-                .cloned()
-                .map(|x| transform_predicate(x, partition_fields).unwrap()),
+                .filter_map(|expr| project(expr, partition_fields, &partition_schema)),
         );
 
         let manifests = table
@@ -657,7 +643,9 @@ async fn table_scan(
             .await
             .map_err(DataFusionIcebergError::from)?;
 
-        // If there is a filter expression on the partition column, the manifest files to read are pruned.
+        // Filters are projected onto the partition columns (inclusively: a manifest is
+        // only pruned if no row in it can match). Manifests whose partition summaries
+        // cannot satisfy the projection are skipped.
         let data_files: Vec<(ManifestPath, ManifestEntry)> =
             if let Some(predicate) = partition_predicates {
                 let physical_partition_predicate = create_physical_expr(
