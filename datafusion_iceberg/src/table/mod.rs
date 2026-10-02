@@ -42,6 +42,7 @@ use std::{
 use tokio::sync::mpsc::{self};
 use tracing::{instrument, Instrument};
 
+use crate::partition_value::value_to_scalar;
 use crate::statistics::statistics_from_datafiles;
 use crate::table::expr_adapter::IcebergPhysicalExprAdapterFactory;
 use crate::{
@@ -557,6 +558,10 @@ async fn table_scan(
         .transpose()?;
 
     let mut table_partition_cols = datafusion_partition_columns(partition_fields)?;
+    let partition_types: Vec<DataType> = table_partition_cols
+        .iter()
+        .map(|field| field.data_type().clone())
+        .collect();
 
     let file_schema: SchemaRef = Arc::new((schema.fields()).try_into().unwrap());
 
@@ -941,6 +946,7 @@ async fn table_scan(
         .then(|(partition_value, mut delete_files)| {
             let object_store_url = object_store_url.clone();
             let statistics = statistics.clone();
+            let partition_types = partition_types.clone();
             let schema = &schema;
             let file_source = file_source.clone();
             let expr_adapter = expr_adapter.clone();
@@ -996,6 +1002,7 @@ async fn table_scan(
                     .try_fold(None, |acc, delete_manifest| {
                         let object_store_url = object_store_url.clone();
                         let statistics = statistics.clone();
+                        let partition_types = partition_types.clone();
                         let schema = &schema;
                         let file_source = file_source.clone();
                         let expr_adapter = expr_adapter.clone();
@@ -1015,6 +1022,7 @@ async fn table_scan(
                             let data_file = generate_partitioned_file(
                                 schema,
                                 &data_manifest.1,
+                                &partition_types,
                                 last_updated_ms,
                                 enable_data_file_path_column,
                                 manifest_path,
@@ -1070,6 +1078,7 @@ async fn table_scan(
                             let delete_file = generate_partitioned_file(
                                 &delete_schema,
                                 &delete_manifest.1,
+                                &partition_types,
                                 last_updated_ms,
                                 enable_data_file_path_column,
                                 manifest_path,
@@ -1167,6 +1176,7 @@ async fn table_scan(
                         generate_partitioned_file(
                             schema,
                             &x.1,
+                            &partition_types,
                             last_updated_ms,
                             enable_data_file_path_column,
                             manifest_path,
@@ -1232,6 +1242,7 @@ async fn table_scan(
             let file = generate_partitioned_file(
                 &schema,
                 &entry,
+                &partition_types,
                 last_updated_ms,
                 enable_data_file_path_column,
                 manifest_path,
@@ -1528,6 +1539,7 @@ impl DataSink for IcebergDataSink {
 fn generate_partitioned_file(
     schema: &Schema,
     manifest: &ManifestEntry,
+    partition_types: &[DataType],
     last_updated_ms: i64,
     _enable_data_file_path: bool,
     manifest_file_path: Option<ManifestPath>,
@@ -1537,11 +1549,8 @@ fn generate_partitioned_file(
         .data_file()
         .partition()
         .iter()
-        .map(|x| {
-            x.as_ref()
-                .map(value_to_scalarvalue)
-                .unwrap_or(Ok(ScalarValue::Null))
-        })
+        .zip(partition_types)
+        .map(|(value, data_type)| value_to_scalar(value.as_ref(), data_type))
         .collect::<Result<Vec<ScalarValue>, _>>()?;
 
     // `__data_file_path` is always present in `table_partition_cols`; whether
@@ -1580,36 +1589,6 @@ fn generate_partitioned_file(
         arrow_schema: None,
     };
     Ok(file)
-}
-
-fn value_to_scalarvalue(value: &Value) -> Result<ScalarValue, DataFusionError> {
-    match value {
-        Value::Boolean(b) => Ok(ScalarValue::Boolean(Some(*b))),
-        Value::Int(i) => Ok(ScalarValue::Int32(Some(*i))),
-        Value::LongInt(l) => Ok(ScalarValue::Int64(Some(*l))),
-        Value::Float(f) => Ok(ScalarValue::Float32(Some(f.into_inner()))),
-        Value::Double(d) => Ok(ScalarValue::Float64(Some(d.into_inner()))),
-        Value::Date(d) => Ok(ScalarValue::Date32(Some(*d))),
-        Value::Time(t) => Ok(ScalarValue::Time64Microsecond(Some(*t))),
-        Value::Timestamp(ts) => Ok(ScalarValue::TimestampMicrosecond(Some(*ts), None)),
-        Value::TimestampTZ(ts) => Ok(ScalarValue::TimestampMicrosecond(
-            Some(*ts),
-            Some("UTC".into()),
-        )),
-        Value::String(s) => Ok(ScalarValue::Utf8(Some(s.clone()))),
-        Value::UUID(u) => Ok(ScalarValue::FixedSizeBinary(
-            16,
-            Some(u.as_bytes().to_vec()),
-        )),
-        Value::Fixed(size, bytes) => Ok(ScalarValue::FixedSizeBinary(
-            *size as i32,
-            Some(bytes.clone()),
-        )),
-        Value::Binary(bytes) => Ok(ScalarValue::Binary(Some(bytes.clone()))),
-        x => Err(DataFusionError::External(Box::new(Error::NotSupported(
-            format!("Conversion from Value {x} to ScalarValue"),
-        )))),
-    }
 }
 
 /// Writes record batches as Parquet data files to an Iceberg table.
