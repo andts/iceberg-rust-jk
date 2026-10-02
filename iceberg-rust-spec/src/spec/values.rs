@@ -357,6 +357,14 @@ impl FromIterator<(String, Option<Value>)> for Struct {
     }
 }
 
+/// Serializes the struct as a manifest entry's `partition` record (`r102`) in
+/// the Avro physical form that
+/// [`partition_value_schema`](super::manifest::partition_value_schema)
+/// declares: fixed and uuid values as `fixed` bytes, binary as `bytes`, NULL
+/// partition values as Avro nulls. This is the manifest-partition Avro form,
+/// not a general-purpose (e.g. JSON) encoding of a struct value. Decimal values
+/// must first be encoded with
+/// [`ManifestEntry::encode_partition_for_avro`](super::manifest::ManifestEntry::encode_partition_for_avro).
 impl Serialize for Struct {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -374,6 +382,10 @@ impl Serialize for Struct {
     }
 }
 
+/// Deserializes a manifest entry's Avro `partition` record (`r102`), the
+/// manifest-partition Avro form written by `Struct`'s `Serialize` impl. Values
+/// keep their raw Avro form (bytes stay bytes, integers that fit are `Int`);
+/// `Struct::cast` then gives each value its partition field's type.
 impl<'de> Deserialize<'de> for Struct {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

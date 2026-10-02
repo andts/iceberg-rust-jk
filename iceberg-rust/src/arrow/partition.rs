@@ -22,12 +22,25 @@ type Partition = (Vec<Option<Value>>, RecordBatch);
 
 /// Splits `record_batch` into one batch per distinct partition tuple.
 ///
-/// Each item is the partition tuple (one entry per partition field, `None`
-/// for a null value) and the rows that belong to it. Partitions appear in
-/// order of their first row.
+/// # Arguments
+/// * `record_batch` - the rows to split; must contain every partition field's
+///   source column (looked up by the source field's name)
+/// * `partition_fields` - the partition spec's fields bound to their source
+///   columns, in spec order
+///
+/// # Returns
+/// An iterator with one item per partition: the partition tuple (one
+/// `Option<Value>` per partition field, typed as the field's result type, with
+/// `None` for a null value) and a `RecordBatch` holding the rows that belong
+/// to it. Partitions appear in order of their first row. Grouping and the
+/// tuples are computed up front; each item's `Err` only reports a failure to
+/// take its rows from `record_batch`.
 ///
 /// # Errors
-/// A missing source column, an unsupported transform, or an Arrow failure.
+/// A missing source column, a transform the source type does not support, a
+/// partition value that cannot be read as an Iceberg [`Value`] (e.g. an
+/// identity partition on a `timestamp_ns` column, which has no `Value`
+/// variant), or an Arrow failure.
 pub fn partition_record_batch<'a>(
     record_batch: &'a RecordBatch,
     partition_fields: &[BoundPartitionField<'_>],

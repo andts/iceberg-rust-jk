@@ -17,6 +17,13 @@ use ordered_float::OrderedFloat;
 use uuid::Uuid;
 
 /// The value at `row` of `array`, read as Iceberg type `ty`; `None` if null.
+///
+/// # Errors
+/// `ArrowError::ComputeError` when `ty` is not a primitive type, the Arrow
+/// type does not hold `ty`, or the cell is not a valid value (e.g. an invalid
+/// uuid). `timestamp_ns`/`timestamptz_ns` are not supported because `Value`
+/// has no nanosecond variant, so an identity partition on such a column
+/// returns an error.
 pub fn arrow_value(array: &dyn Array, row: usize, ty: &Type) -> Result<Option<Value>, ArrowError> {
     if array.is_null(row) {
         return Ok(None);
