@@ -165,13 +165,23 @@ impl ManifestEntry {
     /// Re-encodes the partition tuple into the physical form declared by
     /// [`partition_value_schema`] for the same `partition_fields`.
     ///
-    /// Call this on every entry before serializing it to Avro with
-    /// [`ManifestEntry::schema`]: decimal partition values are written as
+    /// Contract: this must be applied to every entry whose partition tuple
+    /// may hold decimal values before the entry is serialized to Avro with
+    /// [`ManifestEntry::schema`]. Decimal partition values are written as
     /// `fixed` bytes whose size depends on the partition field's precision,
-    /// which the in-memory value does not carry.
+    /// which the in-memory value does not carry; an unencoded decimal is not
+    /// written in that `fixed` form. `ManifestWriter` (in `iceberg-rust`)
+    /// applies it to every entry it appends; callers that serialize entries
+    /// themselves must call it. Non-decimal values are left unchanged, so
+    /// applying it to any entry is safe.
+    ///
+    /// # Arguments
+    /// * `partition_fields` - the partition spec's fields bound to the table
+    ///   schema, the same fields passed to [`partition_value_schema`].
     ///
     /// # Errors
-    /// Fails if a decimal partition value does not fit its partition field.
+    /// Fails if a decimal partition value has no matching decimal partition
+    /// field or does not fit its partition field's precision and scale.
     pub fn encode_partition_for_avro(
         mut self,
         partition_fields: &[BoundPartitionField<'_>],

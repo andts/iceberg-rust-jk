@@ -583,20 +583,22 @@ async fn write_parquet_files(
 
 /// Generates a partition path string from partition fields and their values.
 ///
-/// Creates a path string in the format "field1=value1/field2=value2/..." for each
-/// partition field and its corresponding value.
+/// Creates a path string in the format "field1=value1/field2=value2/" (with a
+/// trailing slash) for each partition field and its corresponding value. A
+/// NULL partition value (`None`) renders as `null`, matching Java
+/// (`field=null`); other values use their `Display` form.
 ///
 /// # Arguments
-/// * `partition_fields` - List of bound partition fields defining the partitioning
-/// * `partition_values` - List of values for each partition field
+/// * `partition_fields` - the bound partition fields, in spec order
+/// * `partition_values` - one value per partition field, as returned by
+///   [`partition_record_batch`];
+///   `None` is a NULL partition value. Extra entries on either side are ignored.
 ///
 /// # Returns
-/// * `Result<String, ArrowError>` - The generated partition path string
+/// The partition path, or an empty string for an unpartitioned table.
 ///
 /// # Errors
-/// Returns an error if:
-/// * The partition field name cannot be processed
-/// * The partition value cannot be converted to a string
+/// Does not currently fail; the `Result` is kept for API stability.
 #[inline]
 pub fn generate_partition_path(
     partition_fields: &[BoundPartitionField<'_>],

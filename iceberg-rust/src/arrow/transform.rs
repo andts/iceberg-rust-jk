@@ -27,9 +27,23 @@ use uuid::Uuid;
 
 /// Applies `transform` to `array`, whose values have Iceberg type `source_type`.
 ///
-/// Results: Int32 for bucket and the temporal transforms; the source type for
-/// identity and truncate (Int8/Int16 are widened to Int32, Iceberg's `int`);
-/// a null array of the source type for void.
+/// # Arguments
+/// * `array` - the partition source column
+/// * `transform` - the partition field's transform
+/// * `source_type` - the source column's Iceberg type; distinguishes a uuid
+///   stored as a string or fixed binary from a plain string or binary
+///
+/// # Returns
+/// The transformed column: Int32 for bucket and the temporal transforms; the
+/// source type for identity and truncate (Int8/Int16 are widened to Int32,
+/// Iceberg's `int`); a null array of the source type for void.
+///
+/// An identity partition on a `timestamp_ns`/`timestamptz_ns` column returns
+/// the nanosecond array unchanged, but it is not supported as a partition:
+/// there is no nanosecond [`Value`](iceberg_rust_spec::spec::values::Value)
+/// variant, so reading its values with
+/// [`arrow_value`](crate::arrow::value::arrow_value) (as
+/// `partition_record_batch` does) returns an error.
 ///
 /// # Errors
 /// A transform/type pair the spec does not allow, a width of 0, or an
