@@ -458,10 +458,15 @@ impl ScalarUDFImpl for DateTransform {
             )))),
         }?;
         match array {
-            ColumnarValue::Array(array) => Ok(ColumnarValue::Array(transform_arrow(
-                array.clone(),
-                &transform,
-            )?)),
+            ColumnarValue::Array(array) => {
+                let source_type = iceberg_rust::spec::types::Type::try_from(array.data_type())
+                    .map_err(|err| DataFusionError::External(Box::new(err)))?;
+                Ok(ColumnarValue::Array(transform_arrow(
+                    array.clone(),
+                    &transform,
+                    &source_type,
+                )?))
+            }
             ColumnarValue::Scalar(scalar) => Ok(ColumnarValue::Scalar(
                 value_to_scalarvalue(
                     scalarvalue_to_value(scalar)
@@ -687,8 +692,8 @@ mod tests {
     #[test]
     fn month_on_date32() {
         let result = invoke_date_transform("month", ScalarValue::Date32(Some(19797))).unwrap();
-        // (2024 - 1970) * 12 + 3 = 651 (month is 1-based)
-        assert_eq!(unwrap_int32(result), 651);
+        // (2024 - 1970) * 12 + 2 = 650 (months since 1970-01, 0-based per the Iceberg spec)
+        assert_eq!(unwrap_int32(result), 650);
     }
 
     #[test]
@@ -727,8 +732,8 @@ mod tests {
             ScalarValue::TimestampMicrosecond(Some(TS_MICROS), None),
         )
         .unwrap();
-        // (2024 - 1970) * 12 + 3 = 651 (month is 1-based)
-        assert_eq!(unwrap_int32(result), 651);
+        // (2024 - 1970) * 12 + 2 = 650 (months since 1970-01, 0-based per the Iceberg spec)
+        assert_eq!(unwrap_int32(result), 650);
     }
 
     #[test]
@@ -772,7 +777,7 @@ mod tests {
             ScalarValue::TimestampMicrosecond(Some(TS_MICROS), Some("UTC".into())),
         )
         .unwrap();
-        assert_eq!(unwrap_int32(result), 651);
+        assert_eq!(unwrap_int32(result), 650);
     }
 
     #[test]
@@ -802,7 +807,7 @@ mod tests {
         // 1970-01-01T00:00:00Z
         let cases = vec![
             ("year", 0),  // 1970 - 1970 = 0
-            ("month", 1), // 0 * 12 + 1 = 1 (month is 1-based)
+            ("month", 0), // 0 * 12 + 0 = 0 (0-based per the Iceberg spec)
             ("day", 0),   // day 0 since epoch
             ("hour", 0),  // hour 0 since epoch
         ];

@@ -14,6 +14,7 @@
 pub mod partition;
 pub mod read;
 pub mod transform;
+pub mod value;
 pub mod write;
 
 #[cfg(test)]

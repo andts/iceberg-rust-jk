@@ -3689,6 +3689,7 @@ dependencies = [
  "lru",
  "murmur3",
  "object_store",
+ "ordered-float 5.5.0",
  "parquet",
  "pin-project-lite",
  "regex",

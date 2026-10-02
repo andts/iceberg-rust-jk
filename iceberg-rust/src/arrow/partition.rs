@@ -58,7 +58,8 @@ pub fn partition_record_batch<'a>(
             let array = record_batch
                 .column_by_name(field.source_name())
                 .ok_or(ArrowError::SchemaError("Column doesn't exist".to_string()))?;
-            let transformed = transform_arrow(array.clone(), field.transform())?;
+            let transformed =
+                transform_arrow(array.clone(), field.transform(), field.field_type())?;
             // Partition values are `Utf8` the whole way down from here.
             if transformed.data_type() == &DataType::Utf8View {
                 cast(&transformed, &DataType::Utf8)
