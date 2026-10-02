@@ -2,9 +2,12 @@
 
 use datafusion::{arrow::datatypes::DataType, common::DataFusionError, scalar::ScalarValue};
 use iceberg_rust::spec::{
-    decimal::{decimal_mantissa, decimal_scale},
+    decimal::{decimal_from_i128_with_scale, decimal_mantissa, decimal_scale},
+    types::{PrimitiveType, Type},
     values::Value,
 };
+use ordered_float::OrderedFloat;
+use uuid::Uuid;
 
 /// `value` as a scalar of `data_type` (a typed null for `None`).
 pub(crate) fn value_to_scalar(
@@ -40,6 +43,53 @@ pub(crate) fn value_to_scalar(
         }
     };
     scalar.cast_to(data_type)
+}
+
+/// `scalar` as an Iceberg value of type `ty`; `None` if null or not convertible.
+pub(crate) fn scalar_to_value(scalar: &ScalarValue, ty: &Type) -> Option<Value> {
+    let Type::Primitive(primitive) = ty else {
+        return None;
+    };
+    Some(match (scalar, primitive) {
+        (ScalarValue::Boolean(Some(v)), PrimitiveType::Boolean) => Value::Boolean(*v),
+        (ScalarValue::Int32(Some(v)), PrimitiveType::Int) => Value::Int(*v),
+        (ScalarValue::Int64(Some(v)), PrimitiveType::Long) => Value::LongInt(*v),
+        (ScalarValue::Float32(Some(v)), PrimitiveType::Float) => Value::Float(OrderedFloat(*v)),
+        (ScalarValue::Float64(Some(v)), PrimitiveType::Double) => Value::Double(OrderedFloat(*v)),
+        (ScalarValue::Date32(Some(v)), PrimitiveType::Date) => Value::Date(*v),
+        (ScalarValue::Time64Microsecond(Some(v)), PrimitiveType::Time) => Value::Time(*v),
+        (ScalarValue::TimestampMicrosecond(Some(v), _), PrimitiveType::Timestamp) => {
+            Value::Timestamp(*v)
+        }
+        (ScalarValue::TimestampMicrosecond(Some(v), _), PrimitiveType::Timestamptz) => {
+            Value::TimestampTZ(*v)
+        }
+        (
+            ScalarValue::Utf8(Some(v))
+            | ScalarValue::LargeUtf8(Some(v))
+            | ScalarValue::Utf8View(Some(v)),
+            PrimitiveType::String,
+        ) => Value::String(v.clone()),
+        (
+            ScalarValue::Utf8(Some(v))
+            | ScalarValue::LargeUtf8(Some(v))
+            | ScalarValue::Utf8View(Some(v)),
+            PrimitiveType::Uuid,
+        ) => Value::UUID(Uuid::parse_str(v).ok()?),
+        (
+            ScalarValue::Binary(Some(v))
+            | ScalarValue::LargeBinary(Some(v))
+            | ScalarValue::BinaryView(Some(v)),
+            PrimitiveType::Binary,
+        ) => Value::Binary(v.clone()),
+        (ScalarValue::FixedSizeBinary(_, Some(v)), PrimitiveType::Fixed(len)) => {
+            Value::Fixed(*len as usize, v.clone())
+        }
+        (ScalarValue::Decimal128(Some(v), _, scale), PrimitiveType::Decimal { .. }) => {
+            Value::Decimal(decimal_from_i128_with_scale(*v, u32::try_from(*scale).ok()?).ok()?)
+        }
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

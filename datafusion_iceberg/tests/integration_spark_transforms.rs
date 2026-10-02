@@ -24,7 +24,6 @@ async fn count(ctx: &SessionContext, sql: &str) -> i64 {
 }
 
 #[tokio::test]
-#[ignore = "partition filter pruning fixed in PR 3 (Task 10)"]
 async fn datafusion_reads_spark_partitioned_table() {
     let stack = boot_spark_stack().await;
     spark_sql_ok(&stack, "CREATE NAMESPACE IF NOT EXISTS demo.xeng").await;

@@ -12,34 +12,24 @@
  * For the second level the trait PruningStatistics is implemented for the Manifest
 */
 
-use std::{any::Any, sync::Arc};
+use std::any::Any;
 
-use crate::error::Error as DatafusionIcebergError;
 use datafusion::{
     arrow::{
         array::ArrayRef,
-        datatypes::{DataType, Schema as ArrowSchema, TimeUnit},
+        datatypes::{DataType, Schema as ArrowSchema},
     },
     common::pruning::PruningStatistics,
-    common::{
-        tree_node::{Transformed, TreeNode},
-        DataFusionError,
-    },
+    common::DataFusionError,
     prelude::Column,
     scalar::ScalarValue,
 };
-use datafusion_expr::{
-    expr::ScalarFunction, BinaryExpr, ColumnarValue, Expr, ScalarFunctionArgs, ScalarUDF,
-    ScalarUDFImpl, Signature, TypeSignature, Volatility,
-};
 use iceberg_rust::{
-    arrow::transform::transform_arrow,
-    error::Error,
     spec::{
         decimal::{decimal_mantissa, decimal_scale, Decimal},
         manifest::ManifestEntry,
         manifest_list::ManifestListEntry,
-        partition::{BoundPartitionField, Transform},
+        partition::BoundPartitionField,
         schema::Schema,
         values::Value,
     },
@@ -119,7 +109,7 @@ impl PruningStatistics for PruneManifests<'_, '_> {
             .partition_fields
             .iter()
             .enumerate()
-            .find(|(_, field)| field.source_name() == column.name())?;
+            .find(|(_, field)| field.name() == column.name())?;
         let contains_null = self.files.iter().map(|manifest| {
             (manifest.partition_spec_id == self.partition_spec_id)
                 .then_some(manifest)
@@ -138,16 +128,13 @@ impl PruningStatistics for PruneManifests<'_, '_> {
     }
 
     fn row_counts(&self) -> Option<ArrayRef> {
-        let row_counts = self.files.iter().map(|x| {
-            match (
-                x.added_rows_count,
-                x.existing_rows_count,
-                x.deleted_rows_count,
-            ) {
-                (Some(a), Some(e), Some(d)) => Some(a + e - d),
-                _ => None,
-            }
-        });
+        let row_counts =
+            self.files
+                .iter()
+                .map(|x| match (x.added_rows_count, x.existing_rows_count) {
+                    (Some(a), Some(e)) => Some(a + e),
+                    _ => None,
+                });
         ScalarValue::iter_to_array(row_counts.map(ScalarValue::Int64)).ok()
     }
 }
@@ -326,218 +313,15 @@ fn any_iter_to_array(
     }
 }
 
-pub(crate) fn transform_predicate(
-    expr: Expr,
-    partition_fields: &[BoundPartitionField],
-) -> Result<Expr, DataFusionError> {
-    expr.transform_down(|expr| match expr {
-        Expr::BinaryExpr(bin) => match (*bin.left, *bin.right) {
-            (Expr::Column(column), right) => {
-                let field = partition_fields
-                    .iter()
-                    .find(|x| x.source_name() == column.name())
-                    .unwrap();
-                Ok(Transformed::yes(Expr::BinaryExpr(BinaryExpr::new(
-                    Box::new(Expr::Column(Column::new(
-                        column.relation,
-                        field.name().to_owned(),
-                    ))),
-                    bin.op,
-                    Box::new(transform_literal(right, field.transform())?),
-                ))))
-            }
-            (left, Expr::Column(column)) => {
-                let field = partition_fields
-                    .iter()
-                    .find(|x| x.source_name() == column.name())
-                    .unwrap();
-                Ok(Transformed::yes(Expr::BinaryExpr(BinaryExpr::new(
-                    Box::new(Expr::Column(Column::new(
-                        column.relation,
-                        field.name().to_owned(),
-                    ))),
-                    bin.op,
-                    Box::new(transform_literal(left, field.transform())?),
-                ))))
-            }
-            (left, right) => Ok(Transformed::no(Expr::BinaryExpr(BinaryExpr::new(
-                Box::new(left),
-                bin.op,
-                Box::new(right),
-            )))),
-        },
-        x => Ok(Transformed::no(x)),
-    })
-    .map(|x| x.data)
-}
-
-fn transform_literal(expr: Expr, transform: &Transform) -> Result<Expr, DataFusionError> {
-    match transform {
-        Transform::Year => Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
-            Arc::new(ScalarUDF::new_from_impl(DateTransform::new())),
-            vec![Expr::Literal(ScalarValue::new_utf8("year"), None), expr],
-        ))),
-        Transform::Month => Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
-            Arc::new(ScalarUDF::new_from_impl(DateTransform::new())),
-            vec![Expr::Literal(ScalarValue::new_utf8("month"), None), expr],
-        ))),
-        Transform::Day => Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
-            Arc::new(ScalarUDF::new_from_impl(DateTransform::new())),
-            vec![Expr::Literal(ScalarValue::new_utf8("day"), None), expr],
-        ))),
-        Transform::Hour => Ok(Expr::ScalarFunction(ScalarFunction::new_udf(
-            Arc::new(ScalarUDF::new_from_impl(DateTransform::new())),
-            vec![Expr::Literal(ScalarValue::new_utf8("hour"), None), expr],
-        ))),
-        _ => Ok(expr),
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Hash)]
-struct DateTransform {
-    signature: Signature,
-}
-
-impl DateTransform {
-    fn new() -> Self {
-        let signature = Signature {
-            type_signature: TypeSignature::OneOf(vec![
-                TypeSignature::Exact(vec![DataType::Utf8, DataType::Date32]),
-                TypeSignature::Exact(vec![
-                    DataType::Utf8,
-                    DataType::Timestamp(TimeUnit::Microsecond, None),
-                ]),
-                // Iceberg `timestamptz` is always UTC microseconds, mapped to
-                // Timestamp(Microsecond, Some("UTC")) in iceberg-rust-spec/src/arrow/schema.rs.
-                // Arrow allows arbitrary tz strings [1] but we only accept "UTC".
-                // [1] https://github.com/apache/arrow/blob/apache-arrow-23.0.1/format/Schema.fbs#L385
-                TypeSignature::Exact(vec![
-                    DataType::Utf8,
-                    DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                ]),
-            ]),
-            volatility: Volatility::Immutable,
-            parameter_names: None,
-        };
-        Self { signature }
-    }
-}
-
-impl ScalarUDFImpl for DateTransform {
-    fn name(&self) -> &str {
-        "date_transform"
-    }
-
-    fn signature(&self) -> &Signature {
-        &self.signature
-    }
-
-    fn return_type(&self, _arg_types: &[DataType]) -> datafusion::error::Result<DataType> {
-        Ok(DataType::Int32)
-    }
-
-    fn invoke_with_args(
-        &self,
-        args: ScalarFunctionArgs,
-    ) -> datafusion::error::Result<ColumnarValue> {
-        let args = args.args;
-        let transform = &args[0];
-        let array = &args[1];
-        let ColumnarValue::Scalar(ScalarValue::Utf8(Some(transform))) = transform else {
-            return Err(DataFusionError::External(Box::new(Error::InvalidFormat(
-                "Partition transform".to_owned(),
-            ))));
-        };
-        let transform = match transform.as_str() {
-            "year" => Ok(Transform::Year),
-            "month" => Ok(Transform::Month),
-            "day" => Ok(Transform::Day),
-            "hour" => Ok(Transform::Hour),
-            _ => Err(DataFusionError::External(Box::new(Error::InvalidFormat(
-                "Partition transform".to_owned(),
-            )))),
-        }?;
-        match array {
-            ColumnarValue::Array(array) => {
-                let source_type = iceberg_rust::spec::types::Type::try_from(array.data_type())
-                    .map_err(|err| DataFusionError::External(Box::new(err)))?;
-                Ok(ColumnarValue::Array(transform_arrow(
-                    array.clone(),
-                    &transform,
-                    &source_type,
-                )?))
-            }
-            ColumnarValue::Scalar(scalar) => Ok(ColumnarValue::Scalar(
-                value_to_scalarvalue(
-                    scalarvalue_to_value(scalar)
-                        .map_err(DatafusionIcebergError::from)?
-                        .transform(&transform)
-                        .map_err(DatafusionIcebergError::from)?,
-                )
-                .map_err(DatafusionIcebergError::from)?,
-            )),
-        }
-    }
-}
-
-fn scalarvalue_to_value(scalar: &ScalarValue) -> Result<Value, Error> {
-    match scalar {
-        ScalarValue::Boolean(x) => Ok(Value::Boolean(x.ok_or(Error::InvalidFormat(
-            "Value can't be null when converting to iceberg value".to_owned(),
-        ))?)),
-        ScalarValue::Int32(x) => Ok(Value::Int(x.ok_or(Error::InvalidFormat(
-            "Value can't be null when converting to iceberg value".to_owned(),
-        ))?)),
-        ScalarValue::Int64(x) => Ok(Value::LongInt(x.ok_or(Error::InvalidFormat(
-            "Value can't be null when converting to iceberg value".to_owned(),
-        ))?)),
-        ScalarValue::Date32(x) => Ok(Value::Date(x.ok_or(Error::InvalidFormat(
-            "Value can't be null when converting to iceberg value".to_owned(),
-        ))?)),
-        ScalarValue::Time64Microsecond(x) => Ok(Value::Time(x.ok_or(Error::InvalidFormat(
-            "Value can't be null when converting to iceberg value".to_owned(),
-        ))?)),
-        ScalarValue::TimestampMicrosecond(x, Some(tz)) if tz == &Arc::from("UTC") => {
-            Ok(Value::TimestampTZ(x.ok_or(Error::InvalidFormat(
-                "Value can't be null when converting to iceberg value".to_owned(),
-            ))?))
-        }
-        ScalarValue::TimestampMicrosecond(x, None) => Ok(Value::Timestamp(x.ok_or(
-            Error::InvalidFormat("Value can't be null when converting to iceberg value".to_owned()),
-        )?)),
-        x => Err(Error::NotSupported(format!(
-            "Transforming {x} to iceberg value"
-        ))),
-    }
-}
-
-fn value_to_scalarvalue(value: Value) -> Result<ScalarValue, Error> {
-    match value {
-        Value::Boolean(x) => Ok(ScalarValue::Boolean(Some(x))),
-        Value::Int(x) => Ok(ScalarValue::Int32(Some(x))),
-        Value::LongInt(x) => Ok(ScalarValue::Int64(Some(x))),
-        Value::Date(x) => Ok(ScalarValue::Date32(Some(x))),
-        Value::Time(x) => Ok(ScalarValue::Time64Microsecond(Some(x))),
-        Value::Timestamp(x) => Ok(ScalarValue::TimestampMicrosecond(Some(x), None)),
-        Value::TimestampTZ(x) => Ok(ScalarValue::TimestampMicrosecond(
-            Some(x),
-            Some("UTC".into()),
-        )),
-        x => Err(Error::NotSupported(format!(
-            "Transforming {x} to iceberg value"
-        ))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use datafusion::arrow::array::{
         Array, Date32Array, Decimal128Array, Int64Array, TimestampMicrosecondArray,
     };
-    use datafusion::arrow::datatypes::Field;
-    use datafusion::common::config::ConfigOptions;
+    use datafusion::arrow::datatypes::{Field, TimeUnit};
     use iceberg_rust::spec::decimal::decimal_from_i128_with_scale;
+    use iceberg_rust::spec::partition::Transform;
     use iceberg_rust::spec::{
         manifest::{Content, DataFile, FileFormat, Status},
         manifest_list::{Content as ManifestContent, FieldSummary},
@@ -546,7 +330,6 @@ mod tests {
         types::{PrimitiveType, StructField, StructType, Type},
         values::Struct,
     };
-    use std::sync::Arc;
 
     #[test]
     fn manifest_pruning_does_not_compare_different_partition_specs() {
@@ -647,231 +430,8 @@ mod tests {
         assert!(min_values.is_null(1));
     }
 
-    /// Helper: invoke `DateTransform` directly with a transform name and scalar value.
-    fn invoke_date_transform(
-        transform_name: &str,
-        scalar: ScalarValue,
-    ) -> datafusion::error::Result<ColumnarValue> {
-        let dt = DateTransform::new();
-        let value_type = scalar.data_type();
-        dt.invoke_with_args(ScalarFunctionArgs {
-            args: vec![
-                ColumnarValue::Scalar(ScalarValue::new_utf8(transform_name)),
-                ColumnarValue::Scalar(scalar),
-            ],
-            arg_fields: vec![
-                Arc::new(Field::new("transform", DataType::Utf8, false)),
-                Arc::new(Field::new("value", value_type, true)),
-            ],
-            number_rows: 1,
-            return_field: Arc::new(Field::new("result", DataType::Int32, true)),
-            config_options: Arc::new(ConfigOptions::default()),
-        })
-    }
-
-    /// Extract Int32 from a ColumnarValue, panicking with a clear message on mismatch.
-    fn unwrap_int32(result: ColumnarValue) -> i32 {
-        match result {
-            ColumnarValue::Scalar(ScalarValue::Int32(Some(v))) => v,
-            other => panic!("expected ScalarValue::Int32, got {other:?}"),
-        }
-    }
-
     // 2024-03-15T10:30:00Z in microseconds since epoch
     const TS_MICROS: i64 = 1_710_498_600_000_000;
-
-    // -- invoke DateTransform with Date32 (19797 days since epoch = 2024-03-15) --
-
-    #[test]
-    fn year_on_date32() {
-        let result = invoke_date_transform("year", ScalarValue::Date32(Some(19797))).unwrap();
-        // 2024 - 1970 = 54
-        assert_eq!(unwrap_int32(result), 54);
-    }
-
-    #[test]
-    fn month_on_date32() {
-        let result = invoke_date_transform("month", ScalarValue::Date32(Some(19797))).unwrap();
-        // (2024 - 1970) * 12 + 2 = 650 (months since 1970-01, 0-based per the Iceberg spec)
-        assert_eq!(unwrap_int32(result), 650);
-    }
-
-    #[test]
-    fn day_on_date32() {
-        let result = invoke_date_transform("day", ScalarValue::Date32(Some(19797))).unwrap();
-        assert_eq!(unwrap_int32(result), 19797);
-    }
-
-    #[test]
-    fn hour_on_date32_is_rejected() {
-        // Date32 has no time component — hour transform is not supported
-        let result = invoke_date_transform("hour", ScalarValue::Date32(Some(19797)));
-        assert!(
-            result.is_err(),
-            "hour transform should not be supported for Date32"
-        );
-    }
-
-    // -- invoke DateTransform directly with Timestamp (no TZ) --
-
-    #[test]
-    fn year_on_timestamp() {
-        let result = invoke_date_transform(
-            "year",
-            ScalarValue::TimestampMicrosecond(Some(TS_MICROS), None),
-        )
-        .unwrap();
-        // 2024 - 1970 = 54
-        assert_eq!(unwrap_int32(result), 54);
-    }
-
-    #[test]
-    fn month_on_timestamp() {
-        let result = invoke_date_transform(
-            "month",
-            ScalarValue::TimestampMicrosecond(Some(TS_MICROS), None),
-        )
-        .unwrap();
-        // (2024 - 1970) * 12 + 2 = 650 (months since 1970-01, 0-based per the Iceberg spec)
-        assert_eq!(unwrap_int32(result), 650);
-    }
-
-    #[test]
-    fn day_on_timestamp() {
-        let result = invoke_date_transform(
-            "day",
-            ScalarValue::TimestampMicrosecond(Some(TS_MICROS), None),
-        )
-        .unwrap();
-        // 2024-03-15 is day 19797 since epoch
-        assert_eq!(unwrap_int32(result), 19797);
-    }
-
-    #[test]
-    fn hour_on_timestamp() {
-        let result = invoke_date_transform(
-            "hour",
-            ScalarValue::TimestampMicrosecond(Some(TS_MICROS), None),
-        )
-        .unwrap();
-        // 19797 * 24 + 10 = 475138
-        assert_eq!(unwrap_int32(result), 475138);
-    }
-
-    // -- invoke DateTransform with Timestamp(UTC) --
-
-    #[test]
-    fn year_on_timestamp_with_utc() {
-        let result = invoke_date_transform(
-            "year",
-            ScalarValue::TimestampMicrosecond(Some(TS_MICROS), Some("UTC".into())),
-        )
-        .unwrap();
-        assert_eq!(unwrap_int32(result), 54);
-    }
-
-    #[test]
-    fn month_on_timestamp_with_utc() {
-        let result = invoke_date_transform(
-            "month",
-            ScalarValue::TimestampMicrosecond(Some(TS_MICROS), Some("UTC".into())),
-        )
-        .unwrap();
-        assert_eq!(unwrap_int32(result), 650);
-    }
-
-    #[test]
-    fn day_on_timestamp_with_utc() {
-        let result = invoke_date_transform(
-            "day",
-            ScalarValue::TimestampMicrosecond(Some(TS_MICROS), Some("UTC".into())),
-        )
-        .unwrap();
-        assert_eq!(unwrap_int32(result), 19797);
-    }
-
-    #[test]
-    fn hour_on_timestamp_with_utc() {
-        let result = invoke_date_transform(
-            "hour",
-            ScalarValue::TimestampMicrosecond(Some(TS_MICROS), Some("UTC".into())),
-        )
-        .unwrap();
-        assert_eq!(unwrap_int32(result), 475138);
-    }
-
-    // -- edge cases --
-
-    #[test]
-    fn epoch_zero_transforms() {
-        // 1970-01-01T00:00:00Z
-        let cases = vec![
-            ("year", 0),  // 1970 - 1970 = 0
-            ("month", 0), // 0 * 12 + 0 = 0 (0-based per the Iceberg spec)
-            ("day", 0),   // day 0 since epoch
-            ("hour", 0),  // hour 0 since epoch
-        ];
-        for (name, expected) in cases {
-            let result =
-                invoke_date_transform(name, ScalarValue::TimestampMicrosecond(Some(0), None))
-                    .unwrap();
-            assert_eq!(
-                unwrap_int32(result),
-                expected,
-                "epoch zero: {name} transform"
-            );
-        }
-    }
-
-    #[test]
-    fn invalid_transform_name_is_rejected() {
-        let result = invoke_date_transform(
-            "century",
-            ScalarValue::TimestampMicrosecond(Some(TS_MICROS), None),
-        );
-        assert!(result.is_err(), "unknown transform name should be rejected");
-    }
-
-    #[test]
-    fn signature_rejects_non_utc_timezone() {
-        // Iceberg only maps timestamptz to Timestamp(Microsecond, Some("UTC"))
-        // per iceberg-rust-spec/src/arrow/schema.rs. The DateTransform signature
-        // enforces this — non-UTC tz strings are not accepted.
-        let udf = ScalarUDF::new_from_impl(DateTransform::new());
-        let sig = &udf.signature().type_signature;
-        let non_utc = vec![
-            Some("+00:00".into()),
-            Some("Etc/UTC".into()),
-            Some("America/New_York".into()),
-        ];
-        for tz in non_utc {
-            let args = vec![
-                DataType::Utf8,
-                DataType::Timestamp(TimeUnit::Microsecond, tz.clone()),
-            ];
-            let accepts = match sig {
-                TypeSignature::OneOf(variants) => variants.iter().any(|v| match v {
-                    TypeSignature::Exact(expected) => expected == &args,
-                    _ => false,
-                }),
-                _ => false,
-            };
-            assert!(
-                !accepts,
-                "signature should reject Timestamp(Microsecond, {tz:?})"
-            );
-        }
-    }
-
-    // -- transform_literal wiring --
-
-    #[test]
-    fn transform_literal_identity_passes_through() {
-        let input = Expr::Literal(ScalarValue::TimestampMicrosecond(Some(42), None), None);
-        let result = transform_literal(input.clone(), &Transform::Identity)
-            .expect("identity should pass through");
-        assert_eq!(result, input);
-    }
 
     #[test]
     fn any_iter_to_array_date32() {
@@ -926,11 +486,140 @@ mod tests {
         }
     }
 
+    /// Prunes one manifest whose partition summary is `[transform(source), transform(source)]`
+    /// with `filter`, the way the scan does. Returns whether the manifest is kept.
+    fn manifest_kept(
+        source_type: PrimitiveType,
+        transform: Transform,
+        source: Value,
+        filter: datafusion_expr::Expr,
+    ) -> bool {
+        use datafusion::{
+            execution::context::ExecutionProps, physical_expr::create_physical_expr,
+            physical_optimizer::pruning::PruningPredicateBuilder,
+        };
+        let source_field = StructField::new(2, "c", false, Type::Primitive(source_type), None);
+        let partition = PartitionField::new(2, 1000, "c_part", transform.clone());
+        let fields = [BoundPartitionField::new(&partition, &source_field)];
+        let part_type = source_field.field_type.tranform(&transform).unwrap();
+        let arrow_type: DataType = (&part_type).try_into().unwrap();
+        let schema = std::sync::Arc::new(ArrowSchema::new(vec![Field::new(
+            "c_part", arrow_type, true,
+        )]));
+        let bound = source.transform(&transform).unwrap();
+        let manifests = vec![ManifestListEntry {
+            format_version: FormatVersion::V2,
+            manifest_path: "/m.avro".into(),
+            manifest_length: 1,
+            partition_spec_id: 0,
+            content: ManifestContent::Data,
+            sequence_number: 1,
+            min_sequence_number: 1,
+            added_snapshot_id: 1,
+            added_files_count: Some(1),
+            existing_files_count: Some(0),
+            deleted_files_count: Some(0),
+            added_rows_count: Some(1),
+            existing_rows_count: Some(0),
+            deleted_rows_count: Some(0),
+            partitions: Some(vec![FieldSummary {
+                contains_null: false,
+                contains_nan: None,
+                lower_bound: Some(bound.clone()),
+                upper_bound: Some(bound),
+            }]),
+            key_metadata: None,
+            first_row_id: None,
+        }];
+        let projected = crate::partition_projection::project(&filter, &fields, &schema)
+            .unwrap_or_else(|| panic!("`{filter}` on {transform:?} was not projected"));
+        let physical = create_physical_expr(
+            &projected,
+            &schema.as_ref().clone().try_into().unwrap(),
+            &ExecutionProps::new(),
+            &Default::default(),
+        )
+        .unwrap();
+        let predicate = PruningPredicateBuilder::new()
+            .with_file_schema(schema.clone())
+            .try_build(physical)
+            .unwrap();
+        let keep = predicate
+            .prune(&PruneManifests::new(&fields, 0, &manifests))
+            .unwrap();
+        assert_eq!(keep.len(), 1);
+        keep[0]
+    }
+
+    fn check_prunes(
+        source_type: PrimitiveType,
+        transform: Transform,
+        source: Value,
+        matching: datafusion_expr::Expr,
+        non_matching: datafusion_expr::Expr,
+    ) {
+        assert!(
+            manifest_kept(
+                source_type.clone(),
+                transform.clone(),
+                source.clone(),
+                matching.clone()
+            ),
+            "{transform:?}: `{matching}` must keep the manifest"
+        );
+        assert!(
+            !manifest_kept(source_type, transform.clone(), source, non_matching.clone()),
+            "{transform:?}: `{non_matching}` must prune the manifest"
+        );
+    }
+
     #[test]
-    fn scalar_value_roundtrip_preserves_timezone() {
-        for val in [Value::Timestamp(TS_MICROS), Value::TimestampTZ(TS_MICROS)] {
-            let scalar = value_to_scalarvalue(val.clone()).unwrap();
-            assert_eq!(scalarvalue_to_value(&scalar).unwrap(), val);
-        }
+    fn manifests_are_pruned_by_projected_partition_filters() {
+        use datafusion_expr::{col, lit};
+        let ts = |micros| lit(ScalarValue::TimestampMicrosecond(Some(micros), None));
+        let date = |days| lit(ScalarValue::Date32(Some(days)));
+        // 2023-05-15 12:00:00 and 2023-05-16 00:00:00 in microseconds
+        let ts_value = 1_684_152_000_000_000_i64;
+        let next_day = 1_684_195_200_000_000_i64;
+        // 2023-05-15 as days since epoch
+        let day_value = 19_492;
+
+        check_prunes(
+            PrimitiveType::Long,
+            Transform::Identity,
+            Value::LongInt(15),
+            col("c").eq(lit(15_i64)),
+            col("c").eq(lit(16_i64)),
+        );
+        check_prunes(
+            PrimitiveType::Timestamp,
+            Transform::Day,
+            Value::Timestamp(ts_value),
+            col("c").gt(ts(ts_value - 7_200_000_000)),
+            col("c").gt(ts(next_day)),
+        );
+        let bucket_of = |v: i64| Value::LongInt(v).transform(&Transform::Bucket(4)).unwrap();
+        let other = (16..).find(|v| bucket_of(*v) != bucket_of(15)).unwrap();
+        check_prunes(
+            PrimitiveType::Long,
+            Transform::Bucket(4),
+            Value::LongInt(15),
+            col("c").eq(lit(15_i64)),
+            col("c").eq(lit(other)),
+        );
+        check_prunes(
+            PrimitiveType::String,
+            Transform::Truncate(2),
+            Value::String("abcdef".into()),
+            col("c").eq(lit("abcdef")),
+            col("c").eq(lit("xyz")),
+        );
+        check_prunes(
+            PrimitiveType::Date,
+            Transform::Month,
+            Value::Date(day_value),
+            col("c").gt_eq(date(day_value - 14)),
+            col("c").gt_eq(date(day_value + 17)),
+        );
     }
 }
