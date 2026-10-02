@@ -91,6 +91,7 @@ impl<R: Read> ManifestReader<'_, R> {
     /// * Schema or partition spec information cannot be parsed
     pub(crate) fn new(reader: R) -> Result<Self, Error> {
         let reader = AvroReader::new(reader)?;
+        reject_uuid_partition_values(reader.writer_schema())?;
         let metadata = reader.user_metadata();
 
         let format_version: FormatVersion = match metadata
@@ -141,6 +142,45 @@ impl<R: Read> ManifestReader<'_, R> {
                 .zip(repeat(Arc::new((schema, partition_spec, format_version))))
                 .map(avro_value_to_manifest_entry),
         })
+    }
+}
+
+/// Fails if the manifest's partition record has a uuid logical type.
+///
+/// Iceberg Java writes uuid partition values as `fixed[16]` with
+/// `logicalType: uuid`. apache-avro 0.21 parses that as its `Schema::Uuid`,
+/// which it decodes as a length-prefixed string, so the values would be
+/// mis-decoded. The parsed schema no longer says whether the type was `fixed`
+/// or `string`; neither Java nor this crate writes the string form, so any
+/// uuid logical type is rejected. This crate writes uuid partition values as
+/// plain `fixed[16]` (see `partition_value_schema`).
+fn reject_uuid_partition_values(schema: &AvroSchema) -> Result<(), Error> {
+    let field = |schema: &AvroSchema, name: &str| match schema {
+        AvroSchema::Record(record) => record
+            .lookup
+            .get(name)
+            .map(|index| record.fields[*index].schema.clone()),
+        _ => None,
+    };
+    let Some(partition) =
+        field(schema, "data_file").and_then(|data_file| field(&data_file, "partition"))
+    else {
+        return Ok(());
+    };
+    let AvroSchema::Record(partition) = partition else {
+        return Ok(());
+    };
+    let is_uuid = |schema: &AvroSchema| match schema {
+        AvroSchema::Union(union) => union.variants().contains(&AvroSchema::Uuid),
+        schema => *schema == AvroSchema::Uuid,
+    };
+    match partition.fields.iter().find(|field| is_uuid(&field.schema)) {
+        Some(field) => Err(Error::NotSupported(format!(
+            "manifest partition field {}: uuid partition values written with logicalType uuid \
+             cannot be read with apache-avro 0.21",
+            field.name
+        ))),
+        None => Ok(()),
     }
 }
 
@@ -365,25 +405,25 @@ impl<'schema, 'metadata> ManifestWriter<'schema, 'metadata> {
             },
         )?;
 
-        writer.extend(
-            manifest_reader
-                .map(|entry| {
-                    let mut entry = entry.map_err(|err| {
-                        apache_avro::Error::new(apache_avro::error::Details::DeserializeValue(
-                            err.to_string(),
-                        ))
-                    })?;
-                    *entry.status_mut() = Status::Existing;
-                    if entry.sequence_number().is_none() {
-                        *entry.sequence_number_mut() = Some(manifest.sequence_number);
-                    }
-                    if entry.snapshot_id().is_none() {
-                        *entry.snapshot_id_mut() = Some(manifest.added_snapshot_id);
-                    }
-                    to_value(entry)
-                })
-                .filter_map(Result::ok),
-        )?;
+        let partition_fields = table_metadata.current_partition_fields()?;
+        // Collect first so a read or encode error fails the rewrite instead
+        // of silently dropping the entry (and its data file) from the table.
+        let entries = manifest_reader
+            .map(|entry| {
+                let mut entry = entry?;
+                *entry.status_mut() = Status::Existing;
+                if entry.sequence_number().is_none() {
+                    *entry.sequence_number_mut() = Some(manifest.sequence_number);
+                }
+                if entry.snapshot_id().is_none() {
+                    *entry.snapshot_id_mut() = Some(manifest.added_snapshot_id);
+                }
+                Ok(to_value(
+                    entry.encode_partition_for_avro(&partition_fields)?,
+                )?)
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        writer.extend(entries)?;
 
         manifest.sequence_number = table_metadata.last_sequence_number + 1;
 
@@ -510,14 +550,12 @@ impl<'schema, 'metadata> ManifestWriter<'schema, 'metadata> {
             },
         )?;
 
-        writer.extend(manifest_reader.filter_map(|entry| {
-            let mut entry = entry
-                .map_err(|err| {
-                    apache_avro::Error::new(apache_avro::error::Details::DeserializeValue(
-                        err.to_string(),
-                    ))
-                })
-                .unwrap();
+        let partition_fields = table_metadata.current_partition_fields()?;
+        // Entries in `filter` are the only intended omissions; any read or
+        // encode error fails the rewrite.
+        let mut entries = Vec::new();
+        for entry in manifest_reader {
+            let mut entry = entry?;
             if !filter.contains(entry.data_file().file_path()) {
                 *entry.status_mut() = Status::Existing;
                 if entry.sequence_number().is_none() {
@@ -526,16 +564,18 @@ impl<'schema, 'metadata> ManifestWriter<'schema, 'metadata> {
                 if entry.snapshot_id().is_none() {
                     *entry.snapshot_id_mut() = Some(manifest.added_snapshot_id);
                 }
-                Some(to_value(entry).unwrap())
+                entries.push(to_value(
+                    entry.encode_partition_for_avro(&partition_fields)?,
+                )?);
             } else {
                 if *entry.data_file().content() == Content::Data {
                     filtered_stats.removed_records += entry.data_file().record_count();
                 }
                 filtered_stats.removed_file_size_bytes += entry.data_file().file_size_in_bytes();
                 filtered_stats.removed_data_files += 1;
-                None
             }
-        }))?;
+        }
+        writer.extend(entries)?;
 
         manifest.sequence_number = table_metadata.last_sequence_number + 1;
 
@@ -630,7 +670,9 @@ impl<'schema, 'metadata> ManifestWriter<'schema, 'metadata> {
             }
         };
 
-        self.writer.append_ser(manifest_entry)?;
+        let partition_fields = self.table_metadata.current_partition_fields()?;
+        self.writer
+            .append_ser(manifest_entry.encode_partition_for_avro(&partition_fields)?)?;
 
         match status {
             Status::Added => {
@@ -1173,5 +1215,241 @@ mod partition_summary_tests {
         .unwrap();
         assert!(summaries[0].contains_null);
         assert_eq!(summaries[0].lower_bound, Some(Value::LongInt(3)));
+    }
+}
+
+#[cfg(test)]
+mod avro_partition_tests {
+    use std::collections::HashMap;
+
+    use iceberg_rust_spec::{
+        decimal::decimal_from_i128_with_scale,
+        manifest::{partition_value_schema, Content, DataFile, FileFormat, ManifestEntry, Status},
+        manifest_list::{self, ManifestListEntry},
+        partition::{PartitionField, PartitionSpec, Transform},
+        schema::Schema,
+        table_metadata::{FormatVersion, TableMetadata, TableMetadataBuilder},
+        types::{PrimitiveType, StructField, Type},
+        values::{Struct, Value},
+    };
+
+    use super::{ManifestReader, ManifestWriter};
+    use crate::error::Error;
+
+    fn decimal_table() -> TableMetadata {
+        TableMetadataBuilder::default()
+            .location("/")
+            .current_schema_id(0)
+            .schemas(HashMap::from_iter([(
+                0,
+                Schema::builder()
+                    .with_struct_field(StructField {
+                        id: 1,
+                        name: "amount".to_owned(),
+                        required: false,
+                        field_type: Type::Primitive(PrimitiveType::Decimal {
+                            precision: 3,
+                            scale: 2,
+                        }),
+                        doc: None,
+                        initial_default: None,
+                        write_default: None,
+                    })
+                    .build()
+                    .unwrap(),
+            )]))
+            .default_spec_id(0)
+            .partition_specs(HashMap::from_iter([(
+                0,
+                PartitionSpec::builder()
+                    .with_partition_field(PartitionField::new(
+                        1,
+                        1000,
+                        "amount",
+                        Transform::Identity,
+                    ))
+                    .build()
+                    .unwrap(),
+            )]))
+            .build()
+            .unwrap()
+    }
+
+    fn entry(partition: Value) -> ManifestEntry {
+        ManifestEntry::builder()
+            .with_format_version(FormatVersion::V2)
+            .with_status(Status::Added)
+            .with_snapshot_id(1)
+            .with_sequence_number(1)
+            .with_data_file(
+                DataFile::builder()
+                    .with_content(Content::Data)
+                    .with_file_path("/data.parquet".to_owned())
+                    .with_file_format(FileFormat::Parquet)
+                    .with_partition(Struct::from_iter([("amount".to_owned(), Some(partition))]))
+                    .with_record_count(1)
+                    .with_file_size_in_bytes(10)
+                    .with_column_sizes(None)
+                    .with_value_counts(None)
+                    .with_null_value_counts(None)
+                    .with_nan_value_counts(None)
+                    .with_distinct_counts(None)
+                    .with_lower_bounds(None)
+                    .with_upper_bounds(None)
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()
+    }
+
+    fn manifest() -> ManifestListEntry {
+        ManifestListEntry {
+            format_version: FormatVersion::V2,
+            manifest_path: "/manifest.avro".to_owned(),
+            manifest_length: 0,
+            partition_spec_id: 0,
+            content: manifest_list::Content::Data,
+            sequence_number: 1,
+            min_sequence_number: 1,
+            added_snapshot_id: 1,
+            added_files_count: Some(1),
+            existing_files_count: Some(0),
+            deleted_files_count: Some(0),
+            added_rows_count: Some(1),
+            existing_rows_count: Some(0),
+            deleted_rows_count: Some(0),
+            partitions: None,
+            key_metadata: None,
+            first_row_id: None,
+        }
+    }
+
+    /// An entry whose partition value cannot be encoded for the current spec
+    /// (e.g. read with an older spec) fails the rewrite instead of vanishing.
+    #[test]
+    fn from_existing_propagates_partition_encode_errors() {
+        let table = decimal_table();
+        let schema = ManifestEntry::schema(
+            &partition_value_schema(&table.current_partition_fields().unwrap()).unwrap(),
+            &FormatVersion::V2,
+        )
+        .unwrap();
+        let fits = entry(Value::Decimal(
+            decimal_from_i128_with_scale(123, 2).unwrap(),
+        ));
+        // 123.45 has five digits; the column is decimal(3, 2).
+        let too_wide = entry(Value::Decimal(
+            decimal_from_i128_with_scale(12345, 2).unwrap(),
+        ));
+
+        assert!(ManifestWriter::from_existing(
+            [Ok(fits.clone())].into_iter(),
+            manifest(),
+            &schema,
+            &table
+        )
+        .is_ok());
+        let result = ManifestWriter::from_existing(
+            [Ok(fits), Ok(too_wide)].into_iter(),
+            manifest(),
+            &schema,
+            &table,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(Error::Iceberg(iceberg_rust_spec::error::Error::Conversion(
+                    ..
+                )))
+            ),
+            "{:?}",
+            result.err()
+        );
+    }
+
+    fn zigzag(value: i64, out: &mut Vec<u8>) {
+        let mut n = ((value << 1) ^ (value >> 63)) as u64;
+        while n >= 0x80 {
+            out.push((n as u8) | 0x80);
+            n >>= 7;
+        }
+        out.push(n as u8);
+    }
+
+    fn avro_bytes(bytes: &[u8], out: &mut Vec<u8>) {
+        zigzag(bytes.len() as i64, out);
+        out.extend_from_slice(bytes);
+    }
+
+    /// An Avro object container header (no data blocks) with the given raw
+    /// schema JSON, as another writer (e.g. Iceberg Java) would produce it.
+    fn container_header(schema_json: &str) -> Vec<u8> {
+        let mut out = b"Obj\x01".to_vec();
+        zigzag(2, &mut out);
+        avro_bytes(b"avro.schema", &mut out);
+        avro_bytes(schema_json.as_bytes(), &mut out);
+        avro_bytes(b"avro.codec", &mut out);
+        avro_bytes(b"null", &mut out);
+        zigzag(0, &mut out);
+        out.extend_from_slice(&[7; 16]);
+        out
+    }
+
+    #[test]
+    fn manifest_with_java_uuid_partition_is_rejected() {
+        let partition = r#"{"type": "record", "name": "r102", "fields": [{
+            "name": "u", "field-id": 1000, "default": null,
+            "type": ["null", {"type": "fixed", "size": 16, "logicalType": "uuid", "name": "uuid_fixed"}]
+        }]}"#;
+        let schema = ManifestEntry::schema(partition, &FormatVersion::V2).unwrap();
+        // Re-insert the partition record as Java writes it: apache-avro would
+        // otherwise serialize its parsed form.
+        let mut schema_json: serde_json::Value = serde_json::to_value(&schema).unwrap();
+        let data_file = schema_json["fields"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|field| field["name"] == "data_file")
+            .unwrap();
+        let partition_field = data_file["type"]["fields"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|field| field["name"] == "partition")
+            .unwrap();
+        partition_field["type"] = serde_json::from_str(partition).unwrap();
+        let header = container_header(&schema_json.to_string());
+
+        let result = ManifestReader::new(&header[..]);
+        match result {
+            Err(Error::NotSupported(message)) => assert!(message.contains("uuid"), "{message}"),
+            Err(other) => panic!("unexpected error {other:?}"),
+            Ok(_) => panic!("manifest with a uuid logical type partition was accepted"),
+        }
+    }
+
+    #[test]
+    fn manifest_with_fixed_uuid_partition_is_accepted() {
+        let partition = r#"{"type": "record", "name": "r102", "fields": [{
+            "name": "u", "field-id": 1000, "default": null,
+            "type": ["null", {"type": "fixed", "size": 16, "name": "uuid_fixed"}]
+        }]}"#;
+        let schema = ManifestEntry::schema(partition, &FormatVersion::V2).unwrap();
+        let mut writer = apache_avro::Writer::new(&schema, Vec::new());
+        writer
+            .add_user_metadata(
+                "schema".to_owned(),
+                r#"{"type":"struct","schema-id":0,"fields":[]}"#,
+            )
+            .unwrap();
+        writer
+            .add_user_metadata("partition-spec".to_owned(), "[]")
+            .unwrap();
+        writer
+            .add_user_metadata("format-version".to_owned(), "2")
+            .unwrap();
+        let bytes = writer.into_inner().unwrap();
+        assert!(ManifestReader::new(&bytes[..]).is_ok());
     }
 }

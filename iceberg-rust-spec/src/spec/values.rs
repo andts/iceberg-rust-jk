@@ -42,9 +42,9 @@ use crate::error::Error;
 use super::{
     decimal::{
         decimal_from_i128_with_scale, decimal_mantissa, decimal_scale, decimal_to_be_bytes_min,
-        Decimal,
+        decimal_to_fixed_bytes, Decimal,
     },
-    partition::{PartitionField, Transform},
+    partition::{BoundPartitionField, PartitionField, Transform},
     types::{PrimitiveType, StructType, Type},
 };
 
@@ -268,11 +268,78 @@ impl Struct {
                         .get(name)
                         .ok_or(Error::InvalidFormat("partition_struct".to_string()))?;
                     // Cast the value to the datatype
-                    let value = field.map(|value| value.cast(datatype)).transpose()?;
+                    let value = field
+                        .map(|value| cast_avro_partition_value(value, datatype))
+                        .transpose()?;
                     Ok((name.clone(), value))
                 })
                 .collect::<Result<Vec<_>, Error>>()?,
         ))
+    }
+}
+
+impl Struct {
+    /// Encodes decimal values as the Avro `fixed` bytes
+    /// [`partition_value_schema`](super::manifest::partition_value_schema)
+    /// declares for the same `partition_fields`: big-endian two's complement
+    /// of the unscaled value at the column's scale, sign-extended to the
+    /// minimum size for the column's precision. Other values are unchanged.
+    ///
+    /// # Errors
+    /// Fails if a decimal has no matching decimal partition field or does not
+    /// fit the partition field's precision and scale.
+    pub(crate) fn encode_for_avro(
+        mut self,
+        partition_fields: &[BoundPartitionField<'_>],
+    ) -> Result<Self, Error> {
+        for (name, index) in &self.lookup {
+            let Some(Value::Decimal(decimal)) = &self.fields[*index] else {
+                continue;
+            };
+            let result_type = partition_fields
+                .iter()
+                .find(|field| field.name() == name)
+                .map(|field| field.field_type().tranform(field.transform()))
+                .transpose()?;
+            let Some(Type::Primitive(PrimitiveType::Decimal { precision, scale })) = result_type
+            else {
+                return Err(Error::InvalidFormat(format!(
+                    "decimal partition value {decimal} for non-decimal partition field {name}"
+                )));
+            };
+            let bytes = decimal_to_fixed_bytes(decimal, precision, scale)?;
+            self.fields[*index] = Some(Value::Fixed(bytes.len(), bytes));
+        }
+        Ok(self)
+    }
+}
+
+/// Types a partition value as Avro decoded it (see [`RawPartitionValue`]):
+/// Avro longs that fit in an i32 arrive as `Int`, Avro fixed and bytes as
+/// `Binary`. Everything else is a regular [`Value::cast`].
+fn cast_avro_partition_value(value: Value, data_type: &Type) -> Result<Value, Error> {
+    match (value, data_type) {
+        (
+            Value::Int(input),
+            Type::Primitive(
+                PrimitiveType::Time | PrimitiveType::Timestamp | PrimitiveType::Timestamptz,
+            ),
+        ) => Value::LongInt(input.into()).cast(data_type),
+        (Value::Binary(input), Type::Primitive(PrimitiveType::Fixed(len)))
+            if input.len() as u64 == *len =>
+        {
+            Ok(Value::Fixed(input.len(), input))
+        }
+        (Value::Binary(input), Type::Primitive(PrimitiveType::Uuid)) => {
+            Ok(Value::UUID(Uuid::from_slice(&input)?))
+        }
+        (Value::Binary(input), Type::Primitive(PrimitiveType::Decimal { scale, .. }))
+            if (1..=16).contains(&input.len()) =>
+        {
+            let unscaled = i128::from_be_bytes(sign_extend_be::<16>(&input));
+            Value::Decimal(decimal_from_i128_with_scale(unscaled, *scale)?).cast(data_type)
+        }
+        (value, _) => value.cast(data_type),
     }
 }
 
@@ -298,7 +365,10 @@ impl Serialize for Struct {
         let mut record = serializer.serialize_struct("r102", self.fields.len())?;
         for (i, value) in self.fields.iter().enumerate() {
             let (key, _) = self.lookup.iter().find(|(_, value)| **value == i).unwrap();
-            record.serialize_field(Box::leak(key.clone().into_boxed_str()), value)?;
+            record.serialize_field(
+                Box::leak(key.clone().into_boxed_str()),
+                &value.as_ref().map(AvroPartitionValue),
+            )?;
         }
         record.end()
     }
@@ -326,7 +396,10 @@ impl<'de> Deserialize<'de> for Struct {
                 let mut lookup: BTreeMap<String, usize> = BTreeMap::new();
                 let mut index = 0;
                 while let Some(key) = map.next_key()? {
-                    fields.push(map.next_value()?);
+                    fields.push(
+                        map.next_value::<Option<RawPartitionValue>>()?
+                            .map(|raw| raw.0),
+                    );
                     lookup.insert(key, index);
                     index += 1;
                 }
@@ -338,6 +411,91 @@ impl<'de> Deserialize<'de> for Struct {
             Box::leak(vec![].into_boxed_slice()),
             PartitionStructVisitor,
         )
+    }
+}
+
+/// Serializes a partition value in the Avro physical form that
+/// [`partition_value_schema`](super::manifest::partition_value_schema)
+/// declares: fixed and uuid values as `fixed` bytes, binary as `bytes`.
+/// Decimals must first be encoded with [`Struct::encode_for_avro`].
+struct AvroPartitionValue<'a>(&'a Value);
+
+impl Serialize for AvroPartitionValue<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.0 {
+            Value::Fixed(_, bytes) => apache_avro::serde_avro_fixed::serialize(bytes, serializer),
+            Value::UUID(uuid) => {
+                apache_avro::serde_avro_fixed::serialize(uuid.as_bytes(), serializer)
+            }
+            Value::Binary(bytes) => serializer.serialize_bytes(bytes),
+            value => value.serialize(serializer),
+        }
+    }
+}
+
+/// A partition value as Avro decoded it, before [`Struct::cast`] gives it the
+/// partition field's type: bytes stay bytes, integers that fit are `Int`.
+struct RawPartitionValue(Value);
+
+impl<'de> Deserialize<'de> for RawPartitionValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RawVisitor;
+
+        impl Visitor<'_> for RawVisitor {
+            type Value = Value;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a primitive partition value")
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Value, E> {
+                Ok(Value::Boolean(v))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Value, E> {
+                Ok(i32::try_from(v).map_or(Value::LongInt(v), Value::Int))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Value, E> {
+                i64::try_from(v)
+                    .map_err(E::custom)
+                    .and_then(|v| self.visit_i64(v))
+            }
+
+            fn visit_f32<E: serde::de::Error>(self, v: f32) -> Result<Value, E> {
+                Ok(Value::Float(OrderedFloat(v)))
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Value, E> {
+                Ok(Value::Double(OrderedFloat(v)))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Value, E> {
+                Ok(Value::String(v.to_owned()))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Value, E> {
+                Ok(Value::String(v))
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Value, E> {
+                Ok(Value::Binary(v.to_vec()))
+            }
+
+            fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Value, E> {
+                Ok(Value::Binary(v))
+            }
+        }
+
+        deserializer
+            .deserialize_any(RawVisitor)
+            .map(RawPartitionValue)
     }
 }
 

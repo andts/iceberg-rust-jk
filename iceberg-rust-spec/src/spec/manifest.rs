@@ -24,6 +24,7 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 use crate::{error::Error, partition::BoundPartitionField};
 
 use super::{
+    decimal::decimal_required_bytes,
     partition::PartitionSpec,
     schema::Schema,
     table_metadata::FormatVersion,
@@ -161,6 +162,24 @@ impl FirstRowIdInheritance {
 }
 
 impl ManifestEntry {
+    /// Re-encodes the partition tuple into the physical form declared by
+    /// [`partition_value_schema`] for the same `partition_fields`.
+    ///
+    /// Call this on every entry before serializing it to Avro with
+    /// [`ManifestEntry::schema`]: decimal partition values are written as
+    /// `fixed` bytes whose size depends on the partition field's precision,
+    /// which the in-memory value does not carry.
+    ///
+    /// # Errors
+    /// Fails if a decimal partition value does not fit its partition field.
+    pub fn encode_partition_for_avro(
+        mut self,
+        partition_fields: &[BoundPartitionField<'_>],
+    ) -> Result<Self, Error> {
+        self.data_file.partition = self.data_file.partition.encode_for_avro(partition_fields)?;
+        Ok(self)
+    }
+
     pub fn try_from_v3(
         value: ManifestEntryV3,
         schema: &Schema,
@@ -526,51 +545,90 @@ impl<'de> Deserialize<'de> for FileFormat {
 }
 
 /// Get schema for partition values depending on partition spec and table schema
+///
+/// Each field is a nullable union of the Avro type of the partition field's
+/// result type, as Apache Iceberg Java writes it. A `uuid` is written as a
+/// plain `fixed[16]`: apache-avro 0.21 maps `fixed` + `logicalType: uuid` to
+/// its string-encoded `Schema::Uuid`, which would change the physical
+/// encoding. For the same reason manifests written by Java with a uuid
+/// partition field cannot be decoded; the manifest reader rejects them with
+/// `NotSupported` instead of mis-decoding the values.
 pub fn partition_value_schema(spec: &[BoundPartitionField<'_>]) -> Result<String, Error> {
-    Ok(spec
+    let mut defined_uuid = false;
+    let fields = spec
         .iter()
         .map(|field| {
-            let data_type = avro_schema_datatype(field.field_type());
-            Ok::<_, Error>(
-                r#"
-                {
-                    "name": ""#
-                    .to_owned()
-                    + field.name()
-                    + r#"", 
-                    "type":  ["null",""#
-                    + &format!("{}", &data_type)
-                    + r#""],
-                    "field-id": "#
-                    + &field.field_id().to_string()
-                    + r#",
-                    "default": null
-                },"#,
-            )
+            let result_type = field.field_type().tranform(field.transform())?;
+            let avro_type = partition_avro_type(&result_type, field.field_id(), &mut defined_uuid)?;
+            Ok(serde_json::json!({
+                "name": field.name(),
+                "type": ["null", avro_type],
+                "field-id": field.field_id(),
+                "default": null,
+            }))
         })
-        .try_fold(
-            r#"{"type": "record","name": "r102","fields": ["#.to_owned(),
-            |acc, x| {
-                let result = acc + &x?;
-                Ok::<_, Error>(result)
-            },
-        )?
-        .trim_end_matches(',')
-        .to_owned()
-        + r#"]}"#)
+        .collect::<Result<Vec<_>, Error>>()?;
+    Ok(serde_json::json!({"type": "record", "name": "r102", "fields": fields}).to_string())
 }
 
-fn avro_schema_datatype(data_type: &Type) -> Type {
-    match data_type {
-        Type::Primitive(prim) => match prim {
-            PrimitiveType::Date => Type::Primitive(PrimitiveType::Int),
-            PrimitiveType::Time => Type::Primitive(PrimitiveType::Long),
-            PrimitiveType::Timestamp => Type::Primitive(PrimitiveType::Long),
-            PrimitiveType::Timestamptz => Type::Primitive(PrimitiveType::Long),
-            p => Type::Primitive(p.clone()),
-        },
-        t => t.clone(),
-    }
+/// Avro type of a partition value of `result_type`. Named types get names
+/// unique within the record; the uuid type is defined once and then referenced.
+fn partition_avro_type(
+    result_type: &Type,
+    field_id: i32,
+    defined_uuid: &mut bool,
+) -> Result<serde_json::Value, Error> {
+    use serde_json::json;
+
+    let Type::Primitive(primitive) = result_type else {
+        return Err(Error::NotSupported(format!(
+            "partition values of type {result_type}"
+        )));
+    };
+    Ok(match primitive {
+        PrimitiveType::Boolean => json!("boolean"),
+        PrimitiveType::Int => json!("int"),
+        PrimitiveType::Long => json!("long"),
+        PrimitiveType::Float => json!("float"),
+        PrimitiveType::Double => json!("double"),
+        PrimitiveType::Date => json!({"type": "int", "logicalType": "date"}),
+        PrimitiveType::Time => json!({"type": "long", "logicalType": "time-micros"}),
+        PrimitiveType::Timestamp => {
+            json!({"type": "long", "logicalType": "timestamp-micros", "adjust-to-utc": false})
+        }
+        PrimitiveType::Timestamptz => {
+            json!({"type": "long", "logicalType": "timestamp-micros", "adjust-to-utc": true})
+        }
+        PrimitiveType::TimestampNs => {
+            json!({"type": "long", "logicalType": "timestamp-nanos", "adjust-to-utc": false})
+        }
+        PrimitiveType::TimestamptzNs => {
+            json!({"type": "long", "logicalType": "timestamp-nanos", "adjust-to-utc": true})
+        }
+        PrimitiveType::String => json!("string"),
+        PrimitiveType::Uuid if *defined_uuid => json!("uuid_fixed"),
+        PrimitiveType::Uuid => {
+            *defined_uuid = true;
+            json!({"type": "fixed", "size": 16, "name": "uuid_fixed"})
+        }
+        PrimitiveType::Fixed(size) => {
+            json!({"type": "fixed", "size": size, "name": format!("fixed_{field_id}")})
+        }
+        PrimitiveType::Binary => json!("bytes"),
+        PrimitiveType::Decimal { precision, scale } => json!({
+            "type": "fixed",
+            "size": decimal_required_bytes(*precision),
+            "logicalType": "decimal",
+            "precision": precision,
+            "scale": scale,
+            "name": format!("decimal_{field_id}"),
+        }),
+        _ => {
+            return Err(Error::NotSupported(format!(
+                "partition values of type {result_type}"
+            )))
+        }
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
@@ -1961,7 +2019,7 @@ impl DataFileV2 {
 mod tests {
     use crate::spec::{
         partition::{PartitionField, Transform},
-        table_metadata::TableMetadataBuilder,
+        table_metadata::{TableMetadata, TableMetadataBuilder},
         types::{PrimitiveType, StructField, Type},
         values::{Struct, Value},
     };
@@ -2702,5 +2760,309 @@ mod tests {
             let result = apache_avro::from_value::<Struct>(&record.unwrap()).unwrap();
             assert_eq!(partition_values, result);
         }
+    }
+
+    /// Table metadata whose partition spec has a field of every partition
+    /// result type the manifest partition schema supports.
+    fn all_types_table_metadata() -> TableMetadata {
+        let source = [
+            (1, "s", PrimitiveType::String),
+            (
+                2,
+                "amount",
+                PrimitiveType::Decimal {
+                    precision: 9,
+                    scale: 2,
+                },
+            ),
+            (3, "d", PrimitiveType::Date),
+            (4, "ts", PrimitiveType::Timestamp),
+            (5, "tstz", PrimitiveType::Timestamptz),
+            (6, "u", PrimitiveType::Uuid),
+            (7, "fx", PrimitiveType::Fixed(4)),
+            (8, "bin", PrimitiveType::Binary),
+            (9, "l", PrimitiveType::Long),
+            (10, "b", PrimitiveType::Boolean),
+            (11, "i", PrimitiveType::Int),
+            (12, "f", PrimitiveType::Float),
+            (13, "db", PrimitiveType::Double),
+            (14, "t", PrimitiveType::Time),
+        ];
+        let schema = source
+            .into_iter()
+            .fold(Schema::builder(), |mut builder, (id, name, ty)| {
+                builder.with_struct_field(StructField {
+                    id,
+                    name: name.to_string(),
+                    required: false,
+                    field_type: Type::Primitive(ty),
+                    doc: None,
+                    initial_default: None,
+                    write_default: None,
+                });
+                builder
+            })
+            .build()
+            .unwrap();
+        let partition_fields = [
+            (1, "s_bucket", Transform::Bucket(4)),
+            (2, "amount_trunc", Transform::Truncate(50)),
+            (3, "d", Transform::Identity),
+            (4, "ts", Transform::Identity),
+            (5, "tstz", Transform::Identity),
+            (6, "u", Transform::Identity),
+            (7, "fx", Transform::Identity),
+            (8, "bin", Transform::Identity),
+            (1, "s", Transform::Identity),
+            (9, "l", Transform::Identity),
+            (4, "ts_day", Transform::Day),
+            (10, "b", Transform::Identity),
+            (11, "i", Transform::Identity),
+            (12, "f", Transform::Identity),
+            (13, "db", Transform::Identity),
+            (14, "t", Transform::Identity),
+        ];
+        let spec = partition_fields
+            .into_iter()
+            .enumerate()
+            .fold(
+                PartitionSpec::builder(),
+                |mut builder, (i, (source_id, name, transform))| {
+                    builder.with_partition_field(PartitionField::new(
+                        source_id,
+                        1000 + i as i32,
+                        name,
+                        transform,
+                    ));
+                    builder
+                },
+            )
+            .build()
+            .unwrap();
+        TableMetadataBuilder::default()
+            .location("/")
+            .current_schema_id(0)
+            .schemas(HashMap::from_iter(vec![(0, schema)]))
+            .default_spec_id(0)
+            .partition_specs(HashMap::from_iter(vec![(0, spec)]))
+            .build()
+            .unwrap()
+    }
+
+    fn entry_with_partition(path: &str, partition: Struct) -> ManifestEntry {
+        ManifestEntry {
+            format_version: FormatVersion::V2,
+            status: Status::Added,
+            snapshot_id: Some(1),
+            sequence_number: Some(1),
+            data_file: DataFile {
+                content: Content::Data,
+                file_path: path.to_string(),
+                file_format: FileFormat::Parquet,
+                partition,
+                record_count: 1,
+                file_size_in_bytes: 100,
+                column_sizes: None,
+                value_counts: None,
+                null_value_counts: None,
+                nan_value_counts: None,
+                distinct_counts: None,
+                lower_bounds: None,
+                upper_bounds: None,
+                key_metadata: None,
+                split_offsets: None,
+                equality_ids: None,
+                sort_order_id: None,
+                first_row_id: None,
+                referenced_data_file: None,
+                content_offset: None,
+                content_size_in_bytes: None,
+            },
+        }
+    }
+
+    #[test]
+    fn partition_values_of_every_result_type_round_trip() {
+        use crate::spec::decimal::decimal_from_i128_with_scale;
+
+        let table_metadata = all_types_table_metadata();
+        let partition_fields = table_metadata.current_partition_fields().unwrap();
+        let partition_schema = partition_value_schema(&partition_fields).unwrap();
+        apache_avro::Schema::parse_str(&partition_schema).unwrap();
+
+        let uuid = uuid::Uuid::parse_str("f79c3e09-677c-4bbd-a479-3f349cb785e7").unwrap();
+        let values = |amount: i128, int_like: i32, long_like: i64, bytes: Vec<u8>| {
+            vec![
+                ("s_bucket", Value::Int(int_like.rem_euclid(4))),
+                (
+                    "amount_trunc",
+                    Value::Decimal(decimal_from_i128_with_scale(amount, 2).unwrap()),
+                ),
+                ("d", Value::Date(int_like)),
+                ("ts", Value::Timestamp(long_like)),
+                ("tstz", Value::TimestampTZ(long_like)),
+                ("u", Value::UUID(uuid)),
+                ("fx", Value::Fixed(4, bytes[..4].to_vec())),
+                ("bin", Value::Binary(bytes.clone())),
+                ("s", Value::String("€uro".to_string())),
+                ("l", Value::LongInt(long_like)),
+                ("ts_day", Value::Int(int_like)),
+                ("b", Value::Boolean(true)),
+                ("i", Value::Int(int_like)),
+                ("f", Value::Float(ordered_float::OrderedFloat(1.5))),
+                ("db", Value::Double(ordered_float::OrderedFloat(0.1))),
+                ("t", Value::Time(long_like)),
+            ]
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), Some(value)))
+            .collect::<Struct>()
+        };
+        let all_null = partition_fields
+            .iter()
+            .map(|field| (field.name().to_owned(), None))
+            .collect::<Struct>();
+        let entries = vec![
+            // Negative decimal: needs sign extension to the fixed size.
+            entry_with_partition(
+                "/a",
+                values(-1050, 19492, 1_684_108_800_000_000, vec![0xff, 0, 1, 2, 3]),
+            ),
+            // Largest decimal(9,2) multiple of 50: uses every byte of fixed[4].
+            entry_with_partition("/b", values(999_999_950, -1, 1, b"\x80bc\0".to_vec())),
+            // Small positive decimal whose minimal encoding is one byte.
+            entry_with_partition("/c", values(50, 0, 0, vec![1, 2, 3, 4])),
+            entry_with_partition("/null", all_null),
+        ];
+
+        let schema = ManifestEntry::schema(&partition_schema, &FormatVersion::V2).unwrap();
+        let mut writer = apache_avro::Writer::new(&schema, vec![]);
+        for entry in &entries {
+            let encoded = entry
+                .clone()
+                .encode_partition_for_avro(&partition_fields)
+                .unwrap();
+            // Both write paths of the manifest writer: schema-aware serde and
+            // `to_value` + `append`.
+            writer.append_ser(encoded.clone()).unwrap();
+            writer
+                .append(apache_avro::to_value(encoded).unwrap())
+                .unwrap();
+        }
+        let encoded = writer.into_inner().unwrap();
+
+        // Physical encoding: decimal as sign-extended fixed[4], uuid as 16 raw bytes.
+        let first = apache_avro::Reader::new(&encoded[..])
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        let partition_field = |name: &str| {
+            let AvroValue::Record(entry) = &first else {
+                panic!("{first:?}")
+            };
+            let AvroValue::Record(data_file) =
+                &entry.iter().find(|f| f.0 == "data_file").unwrap().1
+            else {
+                panic!("{entry:?}")
+            };
+            let AvroValue::Record(partition) =
+                &data_file.iter().find(|f| f.0 == "partition").unwrap().1
+            else {
+                panic!("{data_file:?}")
+            };
+            partition.iter().find(|f| f.0 == name).unwrap().1.clone()
+        };
+        let AvroValue::Union(1, amount) = partition_field("amount_trunc") else {
+            panic!("amount_trunc is not a non-null union")
+        };
+        let AvroValue::Decimal(amount) = *amount else {
+            panic!("{amount:?}")
+        };
+        assert_eq!(
+            Vec::<u8>::try_from(amount).unwrap(),
+            vec![0xff, 0xff, 0xfb, 0xe6]
+        );
+        assert_eq!(
+            partition_field("u"),
+            AvroValue::Union(1, Box::new(AvroValue::Fixed(16, uuid.as_bytes().to_vec())))
+        );
+
+        let read = apache_avro::Reader::new(&encoded[..])
+            .unwrap()
+            .map(|value| {
+                ManifestEntry::try_from_v2(
+                    apache_avro::from_value::<ManifestEntryV2>(&value.unwrap()).unwrap(),
+                    table_metadata.current_schema().unwrap(),
+                    table_metadata.default_partition_spec().unwrap(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let expected = entries
+            .iter()
+            .flat_map(|entry| [entry.clone(), entry.clone()])
+            .collect::<Vec<_>>();
+        assert_eq!(read.len(), expected.len());
+        for (read, expected) in read.iter().zip(&expected) {
+            assert_eq!(
+                read.data_file().partition().fields,
+                expected.data_file().partition().fields
+            );
+            assert_eq!(read, expected);
+        }
+    }
+
+    #[test]
+    fn partition_schema_uses_avro_types_of_partition_results() {
+        let table_metadata = all_types_table_metadata();
+        let partition_fields = table_metadata.current_partition_fields().unwrap();
+        let schema: serde_json::Value =
+            serde_json::from_str(&partition_value_schema(&partition_fields).unwrap()).unwrap();
+        let types = schema["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|field| {
+                assert_eq!(field["type"][0], "null");
+                assert_eq!(field["default"], serde_json::Value::Null);
+                (
+                    field["name"].as_str().unwrap().to_owned(),
+                    field["type"][1].clone(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        use serde_json::json;
+        assert_eq!(types["s_bucket"], json!("int"));
+        assert_eq!(
+            types["amount_trunc"],
+            json!({"type": "fixed", "size": 4, "logicalType": "decimal", "precision": 9, "scale": 2, "name": "decimal_1001"})
+        );
+        assert_eq!(types["d"], json!({"type": "int", "logicalType": "date"}));
+        assert_eq!(
+            types["ts"],
+            json!({"type": "long", "logicalType": "timestamp-micros", "adjust-to-utc": false})
+        );
+        assert_eq!(
+            types["tstz"],
+            json!({"type": "long", "logicalType": "timestamp-micros", "adjust-to-utc": true})
+        );
+        assert_eq!(
+            types["fx"],
+            json!({"type": "fixed", "size": 4, "name": "fixed_1006"})
+        );
+        assert_eq!(types["bin"], json!("bytes"));
+        assert_eq!(types["s"], json!("string"));
+        assert_eq!(types["l"], json!("long"));
+        assert_eq!(types["ts_day"], json!("int"));
+        assert_eq!(
+            types["t"],
+            json!({"type": "long", "logicalType": "time-micros"})
+        );
+        assert_eq!(types["u"]["type"], json!("fixed"));
+        assert_eq!(
+            types["u"],
+            json!({"type": "fixed", "size": 16, "name": "uuid_fixed"})
+        );
+        assert!(types["u"].get("logicalType").is_none());
     }
 }
