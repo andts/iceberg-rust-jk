@@ -402,7 +402,7 @@ impl Catalog for SqlCatalog {
         let namespace = namespace.to_string();
 
         let rows = {
-            sqlx::query(&format!("select table_namespace, table_name, metadata_location, previous_metadata_location from iceberg_tables where catalog_name = '{}' and table_namespace = '{}';",&name, &namespace)).fetch_all(&self.pool).await.map_err(Error::from)?
+            sqlx::query(&format!("select table_namespace, table_name, metadata_location, previous_metadata_location from iceberg_tables where catalog_name = '{}' and table_namespace = '{}';",name, namespace)).fetch_all(&self.pool).await.map_err(Error::from)?
         };
         let iter = rows.iter().map(query_map);
 
@@ -445,9 +445,9 @@ impl Catalog for SqlCatalog {
         let name = identifier.name().to_string();
 
         let rows = {
-            sqlx::query(&format!("select table_namespace, table_name, metadata_location, previous_metadata_location from iceberg_tables where catalog_name = '{}' and table_namespace = '{}' and table_name = '{}';",&catalog_name,
-                &namespace,
-                &name)).fetch_all(&self.pool).await.map_err(Error::from)?
+            sqlx::query(&format!("select table_namespace, table_name, metadata_location, previous_metadata_location from iceberg_tables where catalog_name = '{}' and table_namespace = '{}' and table_name = '{}';",catalog_name,
+                namespace,
+                name)).fetch_all(&self.pool).await.map_err(Error::from)?
         };
         let mut iter = rows.iter().map(query_map);
 
@@ -458,9 +458,9 @@ impl Catalog for SqlCatalog {
         let namespace = identifier.namespace().to_string();
         let name = identifier.name().to_string();
 
-        sqlx::query(&format!("delete from iceberg_tables where catalog_name = '{}' and table_namespace = '{}' and table_name = '{}';",&catalog_name,
-                &namespace,
-                &name)).execute(&self.pool).await.map_err(Error::from)?;
+        sqlx::query(&format!("delete from iceberg_tables where catalog_name = '{}' and table_namespace = '{}' and table_name = '{}';",catalog_name,
+                namespace,
+                name)).execute(&self.pool).await.map_err(Error::from)?;
         Ok(())
     }
     async fn drop_view(&self, identifier: &Identifier) -> Result<(), IcebergError> {
@@ -468,9 +468,9 @@ impl Catalog for SqlCatalog {
         let namespace = identifier.namespace().to_string();
         let name = identifier.name().to_string();
 
-        sqlx::query(&format!("delete from iceberg_tables where catalog_name = '{}' and table_namespace = '{}' and table_name = '{}';",&catalog_name,
-                &namespace,
-                &name)).execute(&self.pool).await.map_err(Error::from)?;
+        sqlx::query(&format!("delete from iceberg_tables where catalog_name = '{}' and table_namespace = '{}' and table_name = '{}';",catalog_name,
+                namespace,
+                name)).execute(&self.pool).await.map_err(Error::from)?;
         Ok(())
     }
     async fn drop_materialized_view(&self, identifier: &Identifier) -> Result<(), IcebergError> {
@@ -478,9 +478,9 @@ impl Catalog for SqlCatalog {
         let namespace = identifier.namespace().to_string();
         let name = identifier.name().to_string();
 
-        sqlx::query(&format!("delete from iceberg_tables where catalog_name = '{}' and table_namespace = '{}' and table_name = '{}';",&catalog_name,
-                &namespace,
-                &name)).execute(&self.pool).await.map_err(Error::from)?;
+        sqlx::query(&format!("delete from iceberg_tables where catalog_name = '{}' and table_namespace = '{}' and table_name = '{}';",catalog_name,
+                namespace,
+                name)).execute(&self.pool).await.map_err(Error::from)?;
         Ok(())
     }
     async fn load_tabular(
@@ -493,9 +493,9 @@ impl Catalog for SqlCatalog {
             let name = identifier.name().to_string();
 
             let row = {
-                sqlx::query(&format!("select table_namespace, table_name, metadata_location, previous_metadata_location from iceberg_tables where catalog_name = '{}' and table_namespace = '{}' and table_name = '{}';",&catalog_name,
-                    &namespace,
-                    &name)).fetch_one(&self.pool).await.map_err(|_| IcebergError::CatalogNotFound)?
+                sqlx::query(&format!("select table_namespace, table_name, metadata_location, previous_metadata_location from iceberg_tables where catalog_name = '{}' and table_namespace = '{}' and table_name = '{}';",catalog_name,
+                    namespace,
+                    name)).fetch_one(&self.pool).await.map_err(|_| IcebergError::CatalogNotFound)?
             };
             let row = query_map(&row).map_err(Error::from)?;
 

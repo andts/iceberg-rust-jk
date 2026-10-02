@@ -79,7 +79,7 @@ impl fmt::Display for SortOrder {
         write!(
             f,
             "{}",
-            &serde_json::to_string(self).map_err(|_| fmt::Error)?,
+            serde_json::to_string(self).map_err(|_| fmt::Error)?,
         )
     }
 }

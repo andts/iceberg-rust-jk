@@ -360,7 +360,7 @@ async fn plan_create_namespace(
             .collect_tuple()
             .ok_or(DataFusionError::Plan(format!(
                 "Schema name {} has an invalid format.",
-                &node.0.schema_name
+                node.0.schema_name
             )))?;
 
     let catalog_list = session.catalog_list();
@@ -471,7 +471,7 @@ async fn plan_drop_namespace(
 
     let catalog = iceberg_catalog.catalog();
 
-    let namespace = Namespace::try_new(&[namespace_name.to_owned()])
+    let namespace = Namespace::try_new(std::slice::from_ref(&namespace_name))
         .map_err(|err| DataFusionError::External(Box::new(err)))?;
 
     catalog

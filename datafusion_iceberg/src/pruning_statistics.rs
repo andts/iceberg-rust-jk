@@ -20,11 +20,11 @@ use datafusion::{
         array::ArrayRef,
         datatypes::{DataType, Schema as ArrowSchema, TimeUnit},
     },
+    common::pruning::PruningStatistics,
     common::{
         tree_node::{Transformed, TreeNode},
         DataFusionError,
     },
-    common::pruning::PruningStatistics,
     prelude::Column,
     scalar::ScalarValue,
 };
@@ -109,11 +109,11 @@ impl PruningStatistics for PruneManifests<'_, '_> {
         });
         any_iter_to_array(max_values, &(&data_type).try_into().ok()?).ok()
     }
-    
+
     fn num_containers(&self) -> usize {
         self.files.len()
     }
-    
+
     fn null_counts(&self, column: &Column) -> Option<ArrayRef> {
         let (index, _) = self
             .partition_fields

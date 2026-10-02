@@ -430,16 +430,10 @@ async fn integration_trino_rest() {
     // behaviour under test, so accept either representation.
     let grp_col = batch.column(2).as_any();
     let grp_value = if let Some(a) = grp_col.downcast_ref::<StringViewArray>() {
-        assert!(
-            !a.is_null(0),
-            "whitespace group column read back as NULL"
-        );
+        assert!(!a.is_null(0), "whitespace group column read back as NULL");
         a.value(0).to_string()
     } else if let Some(a) = grp_col.downcast_ref::<StringArray>() {
-        assert!(
-            !a.is_null(0),
-            "whitespace group column read back as NULL"
-        );
+        assert!(!a.is_null(0), "whitespace group column read back as NULL");
         a.value(0).to_string()
     } else {
         panic!(

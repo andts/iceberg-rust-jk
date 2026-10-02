@@ -278,7 +278,7 @@ async fn get_source_tables(
                         .or(table.metadata().current_snapshot(None)?)
                         .ok_or(Error::NotFound(format!(
                             "Snapshot in source table {}",
-                            (&identifier.name()),
+                            identifier.name(),
                         )))?
                         .snapshot_id()),
                     Tabular::MaterializedView(mv) => {
@@ -290,7 +290,7 @@ async fn get_source_tables(
                             .or(storage_table.metadata().current_snapshot(None)?)
                             .ok_or(Error::NotFound(format!(
                                 "Snapshot in source table {}",
-                                (&identifier.name()),
+                                identifier.name(),
                             )))?
                             .snapshot_id())
                     }

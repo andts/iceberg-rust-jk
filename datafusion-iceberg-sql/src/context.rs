@@ -31,7 +31,7 @@ impl IcebergContext {
                 .catalog(catalog_name)
                 .ok_or(DataFusionError::Internal(format!(
                     "Catalog {} was not provided",
-                    &catalog_name
+                    catalog_name
                 )))?;
 
             let tabular = catalog
@@ -82,7 +82,7 @@ impl ContextProvider for IcebergContext {
                 .cloned()
                 .ok_or(DataFusionError::Internal(format!(
                     "Couldn't resolve table reference {}.{}",
-                    &schema, &table
+                    schema, table
                 ))),
             _ => Err(DataFusionError::Internal(
                 "Only partial table refence supported".to_string(),
