@@ -226,3 +226,32 @@ async fn insert_identity_partition_on_a_long_string() {
         vec![1]
     );
 }
+
+#[tokio::test]
+async fn date_and_decimal_partitions_round_trip() {
+    let f = Fixture::new().await;
+    f.create_table(
+        "t",
+        vec![
+            PartitionField::new(4, 1000, "d", Transform::Identity),
+            PartitionField::new(6, 1001, "amount_trunc", Transform::Truncate(50)),
+        ],
+    )
+    .await;
+    f.sql("INSERT INTO warehouse.test.t (id, d, amount) VALUES (1, DATE '2023-05-15', 10.65), (2, NULL, NULL)")
+        .await;
+    assert_eq!(
+        f.ids("SELECT id FROM warehouse.test.t ORDER BY id").await,
+        vec![1, 2]
+    );
+    assert_eq!(
+        f.ids("SELECT id FROM warehouse.test.t WHERE d = DATE '2023-05-15'")
+            .await,
+        vec![1]
+    );
+    assert_eq!(
+        f.ids("SELECT id FROM warehouse.test.t WHERE amount = 10.65")
+            .await,
+        vec![1]
+    );
+}
