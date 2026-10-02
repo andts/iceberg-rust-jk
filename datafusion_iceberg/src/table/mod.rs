@@ -1099,7 +1099,10 @@ async fn table_scan(
                             .with_expr_adapter(Some(expr_adapter.clone()))
                             .with_file_group(FileGroup::new(vec![delete_file]))
                             .with_statistics(statistics.clone())
-                            .with_limit(limit)
+                            // Never limit below the anti-join: a limited delete scan
+                            // misses deletes, a limited data scan under-returns. The
+                            // query's LIMIT still applies above this plan.
+                            .with_limit(None)
                             .build();
 
                             let left = ParquetFormat::default()
@@ -1112,7 +1115,7 @@ async fn table_scan(
                                     .with_file_group(FileGroup::new(data_files))
                                     .with_statistics(statistics)
                                     .with_projection_indices(Some(equality_projection))?
-                                    .with_limit(limit)
+                                    .with_limit(None)
                                     .build();
 
                             let data_files_scan = ParquetFormat::default()
@@ -1145,6 +1148,8 @@ async fn table_scan(
                                 })
                                 .collect::<Result<Vec<_>, DataFusionError>>()?;
 
+                            // Spec: a NULL in an equality-delete key matches a NULL
+                            // in the row, column by column.
                             Ok(Some(Arc::new(HashJoinExec::try_new(
                                 left,
                                 right,
@@ -1153,7 +1158,7 @@ async fn table_scan(
                                 &JoinType::RightAnti,
                                 None,
                                 PartitionMode::CollectLeft,
-                                NullEquality::NullEqualsNothing,
+                                NullEquality::NullEqualsNull,
                                 false,
                             )?)
                                 as Arc<dyn ExecutionPlan>))
@@ -1191,7 +1196,7 @@ async fn table_scan(
                             .with_file_group(FileGroup::new(additional_data_files))
                             .with_statistics(statistics)
                             .with_projection_indices(Some(equality_projection))?
-                            .with_limit(limit)
+                            .with_limit(None)
                             .build();
 
                     let data_files_scan = ParquetFormat::default()
