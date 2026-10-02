@@ -27,7 +27,7 @@ use smallvec::SmallVec;
 use crate::{
     error::Error,
     table::datafiles,
-    util::{summary_to_rectangle, Rectangle, Vec4},
+    util::{summary_bounds, Rectangle, Vec4},
 };
 
 use super::{
@@ -206,7 +206,10 @@ pub async fn snapshot_partition_bounds(
 
     ManifestListReader::new(bytes, table_metadata)?.try_fold(None::<Rectangle>, |acc, x| {
         if let Some(partitions) = x?.partitions {
-            let rect = summary_to_rectangle(&partitions)?;
+            // Manifests without bounds (all-null partition column) are skipped.
+            let Some(rect) = summary_bounds(&partitions) else {
+                return Ok(acc);
+            };
             if let Some(mut acc) = acc {
                 acc.expand(&rect);
                 Ok(Some(acc))
@@ -406,7 +409,8 @@ pub(crate) struct ManifestListWriter<'schema, 'metadata> {
     writer: AvroWriter<'schema, Vec<u8>>,
     selected_data_manifest: Option<ManifestListEntry>,
     selected_delete_manifest: Option<ManifestListEntry>,
-    bounding_partition_values: Rectangle,
+    /// `None` if a new file has a null partition value; manifests are then selected and split by count.
+    bounding_partition_values: Option<Rectangle>,
     n_existing_files: usize,
     commit_uuid: String,
     manifest_count: usize,
@@ -572,21 +576,17 @@ impl<'schema, 'metadata> ManifestListWriter<'schema, 'metadata> {
             data_manifest,
             delete_manifest,
             file_count_all_entries,
-        } = if partition_column_names.is_empty() {
-            select_manifest_unpartitioned(manifest_list_reader, &mut writer, None)?
-        } else {
-            select_manifest_partitioned(
-                manifest_list_reader,
-                &mut writer,
-                None,
-                &bounding_partition_values,
-            )?
+        } = match &bounding_partition_values {
+            Some(bounds) if !partition_column_names.is_empty() => {
+                select_manifest_partitioned(manifest_list_reader, &mut writer, None, bounds)?
+            }
+            _ => select_manifest_unpartitioned(manifest_list_reader, &mut writer, None)?,
         };
 
         Ok(Self {
             table_metadata,
             writer,
-            selected_data_manifest: Some(data_manifest),
+            selected_data_manifest: data_manifest,
             selected_delete_manifest: delete_manifest,
             bounding_partition_values,
             n_existing_files: file_count_all_entries,
@@ -670,28 +670,29 @@ impl<'schema, 'metadata> ManifestListWriter<'schema, 'metadata> {
             manifest,
             file_count_all_entries,
             manifests_to_overwrite: manifests,
-        } = if partition_column_names.is_empty() {
-            select_manifest_without_overwrites_unpartitioned(
+        } = match &bounding_partition_values {
+            Some(bounds) if !partition_column_names.is_empty() => {
+                select_manifest_without_overwrites_partitioned(
+                    manifest_list_reader,
+                    &mut writer,
+                    row_id_assigner.as_mut(),
+                    bounds,
+                    manifests_to_overwrite,
+                )?
+            }
+            _ => select_manifest_without_overwrites_unpartitioned(
                 manifest_list_reader,
                 &mut writer,
                 row_id_assigner.as_mut(),
                 manifests_to_overwrite,
-            )?
-        } else {
-            select_manifest_without_overwrites_partitioned(
-                manifest_list_reader,
-                &mut writer,
-                row_id_assigner.as_mut(),
-                &bounding_partition_values,
-                manifests_to_overwrite,
-            )?
+            )?,
         };
 
         Ok((
             Self {
                 table_metadata,
                 writer,
-                selected_data_manifest: Some(manifest),
+                selected_data_manifest: manifest,
                 selected_delete_manifest: None,
                 bounding_partition_values,
                 n_existing_files: file_count_all_entries,
@@ -746,7 +747,7 @@ impl<'schema, 'metadata> ManifestListWriter<'schema, 'metadata> {
                 writer,
                 selected_data_manifest: None,
                 selected_delete_manifest: None,
-                bounding_partition_values: Rectangle::new(Vec4::new(), Vec4::new()),
+                bounding_partition_values: None,
                 n_existing_files: file_count_all_entries,
                 commit_uuid: uuid::Uuid::new_v4().to_string(),
                 manifest_count: 0,
@@ -1227,16 +1228,25 @@ impl<'schema, 'metadata> ManifestListWriter<'schema, 'metadata> {
             Content::Deletes => self.selected_delete_manifest.take(),
         };
 
-        let bounds = selected_manifest
-            .as_ref()
-            .and_then(|x| x.partitions.as_deref())
-            .map(summary_to_rectangle)
-            .transpose()?
-            .map(|mut x| {
-                x.expand(&self.bounding_partition_values);
-                x
-            })
-            .unwrap_or(self.bounding_partition_values.clone());
+        // Without bounds (a null partition value on either side) the empty
+        // rectangle makes `split_datafiles` split by count.
+        let empty_bounds = || Rectangle::new(Vec4::new(), Vec4::new());
+        let bounds = match (
+            selected_manifest
+                .as_ref()
+                .and_then(|x| x.partitions.as_deref()),
+            &self.bounding_partition_values,
+        ) {
+            (Some(summaries), Some(new_bounds)) => match summary_bounds(summaries) {
+                Some(mut bounds) => {
+                    bounds.expand(new_bounds);
+                    bounds
+                }
+                None => empty_bounds(),
+            },
+            (None, Some(new_bounds)) => new_bounds.clone(),
+            (_, None) => empty_bounds(),
+        };
 
         let selected_manifest_bytes_opt = prefetch_manifest(&selected_manifest, &object_store);
 

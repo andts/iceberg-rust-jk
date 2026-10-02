@@ -1826,7 +1826,8 @@ async fn partitions_demuxer(
     table_properties: &HashMap<String, String>,
     table_location: &str,
 ) -> Result<(), DataFusionError> {
-    let mut senders: LruCache<Vec<Value>, mpsc::Sender<RecordBatch>> = LruCache::unbounded();
+    let mut senders: LruCache<Vec<Option<Value>>, mpsc::Sender<RecordBatch>> =
+        LruCache::unbounded();
 
     // Get partition column indices
 

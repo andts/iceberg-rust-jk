@@ -80,38 +80,38 @@ impl Rectangle {
     }
 }
 
-/// Converts the values of a partition struct into a vector in the order that the columns appear in the partition spec
+/// Converts the values of a partition struct into a vector in the order that the columns appear in the partition spec.
+///
+/// Returns `Ok(None)` if any requested partition value is null (a null has no
+/// position in the bounding rectangle) and an error if a field is missing.
 pub(crate) fn partition_struct_to_vec(
     partition_struct: &Struct,
     names: &[&str],
-) -> Result<Vec4<Value>, Error> {
+) -> Result<Option<Vec4<Value>>, Error> {
     names
         .iter()
-        .map(|x| partition_struct.get(x).and_then(Clone::clone))
-        .collect::<Option<SmallVec<_>>>()
-        .ok_or(Error::InvalidFormat("Partition struct".to_owned()))
+        .map(|x| {
+            partition_struct
+                .get(x)
+                .cloned()
+                .ok_or(Error::InvalidFormat("Partition struct".to_owned()))
+        })
+        .collect::<Result<Vec<Option<Value>>, Error>>()
+        .map(|values| values.into_iter().collect::<Option<SmallVec<_>>>())
 }
 
-pub(crate) fn summary_to_rectangle(summaries: &[FieldSummary]) -> Result<Rectangle, Error> {
-    let mut max = SmallVec::with_capacity(summaries.len());
-    let mut min = SmallVec::with_capacity(summaries.len());
-
-    for summary in summaries {
-        max.push(
-            summary
-                .upper_bound
-                .clone()
-                .ok_or(Error::NotFound("Upper bounds in summary".to_owned()))?,
-        );
-        min.push(
-            summary
-                .lower_bound
-                .clone()
-                .ok_or(Error::NotFound("Upper bounds in summary".to_owned()))?,
-        );
-    }
-
-    Ok(Rectangle::new(min, max))
+/// The rectangle spanned by the field summaries' bounds, or `None` if any field
+/// summary lacks a lower or upper bound (e.g. an all-null partition column).
+pub(crate) fn summary_bounds(summaries: &[FieldSummary]) -> Option<Rectangle> {
+    let max = summaries
+        .iter()
+        .map(|x| x.upper_bound.clone())
+        .collect::<Option<Vec4<_>>>()?;
+    let min = summaries
+        .iter()
+        .map(|x| x.lower_bound.clone())
+        .collect::<Option<Vec4<_>>>()?;
+    Some(Rectangle::new(min, max))
 }
 
 /// Compares two vectors by giving a higher priority to the earlier dimensions compared to later dimensions
@@ -142,6 +142,23 @@ mod tests {
     use smallvec::smallvec;
 
     use super::*;
+
+    #[test]
+    fn partition_struct_to_vec_returns_none_for_null_values() {
+        let partition = Struct::from_iter([
+            ("a".to_owned(), Some(Value::Int(1))),
+            ("b".to_owned(), None),
+        ]);
+        assert_eq!(
+            partition_struct_to_vec(&partition, &["a"]).unwrap(),
+            Some(smallvec![Value::Int(1)])
+        );
+        assert_eq!(
+            partition_struct_to_vec(&partition, &["a", "b"]).unwrap(),
+            None
+        );
+        assert!(partition_struct_to_vec(&partition, &["missing"]).is_err());
+    }
 
     #[test]
     fn test_sub_valid() {

@@ -541,8 +541,10 @@ impl Operation {
 
                     manifest_list_writer.append_ser(manifest)?;
                 } else {
+                    // `None` (a null partition value) splits by count.
                     let bounding_partition_values =
-                        bounding_partition_values(files.iter(), &partition_column_names)?;
+                        bounding_partition_values(files.iter(), &partition_column_names)?
+                            .unwrap_or_else(|| Rectangle::new(SmallVec::new(), SmallVec::new()));
 
                     // Split datafiles
                     let splits = split_datafiles(
@@ -732,10 +734,9 @@ impl Operation {
                     });
                     let selected_manifest_location = manifest_list_writer
                         .selected_data_manifest()
-                        .map(|x| x.manifest_path.clone())
-                        .ok_or(Error::NotFound("Selected manifest".to_owned()))?;
-                    let files_to_filter = files_to_overwrite
-                        .get(&selected_manifest_location)
+                        .map(|x| x.manifest_path.clone());
+                    let files_to_filter = selected_manifest_location
+                        .and_then(|location| files_to_overwrite.get(&location))
                         .map(|filter_files| filter_files.iter().cloned().collect::<HashSet<_>>());
 
                     let selected_filter_stats = if n_splits == 0 {
@@ -993,19 +994,31 @@ impl Operation {
     }
 }
 
+/// The rectangle bounding the partition tuples of `iter`.
+///
+/// Returns `Ok(None)` if any file's partition tuple contains a null, since a
+/// null has no position in the rectangle, and an error if there are no files.
 pub fn bounding_partition_values<'a>(
-    mut iter: impl Iterator<Item = &'a DataFile>,
+    iter: impl Iterator<Item = &'a DataFile>,
     partition_column_names: &SmallVec<[&str; 4]>,
-) -> Result<Rectangle, Error> {
-    iter.try_fold(None, |acc, x| {
-        let node = partition_struct_to_vec(x.partition(), partition_column_names)?;
-        let Some(mut acc) = acc else {
-            return Ok::<_, Error>(Some(Rectangle::new(node.clone(), node)));
-        };
-        acc.expand_with_node(node);
-        Ok(Some(acc))
-    })?
-    .ok_or(Error::NotFound("Bounding partition values".to_owned()))
+) -> Result<Option<Rectangle>, Error> {
+    let mut bounds: Option<Rectangle> = None;
+    let mut any_files = false;
+    let mut any_null = false;
+    for file in iter {
+        any_files = true;
+        match partition_struct_to_vec(file.partition(), partition_column_names)? {
+            None => any_null = true,
+            Some(node) => match bounds.as_mut() {
+                Some(bounds) => bounds.expand_with_node(node),
+                None => bounds = Some(Rectangle::new(node.clone(), node)),
+            },
+        }
+    }
+    if !any_files {
+        return Err(Error::NotFound("Bounding partition values".to_owned()));
+    }
+    Ok(if any_null { None } else { bounds })
 }
 
 pub(crate) fn prefetch_manifest(
@@ -1591,5 +1604,47 @@ mod tests {
         let metadata = sample_metadata(&[(1, 1_000), (2, 900)], Some(1), &[]);
         let updates = execute_operation(&metadata, Some(950), None, true, true).unwrap();
         assert!(updates.is_empty());
+    }
+
+    fn data_file_at(n: Option<i64>) -> DataFile {
+        DataFile::builder()
+            .with_content(iceberg_rust_spec::manifest::Content::Data)
+            .with_file_path("s3://bucket/data.parquet".to_owned())
+            .with_file_format(FileFormat::Parquet)
+            .with_partition(Struct::from_iter(vec![(
+                "n".to_owned(),
+                n.map(Value::LongInt),
+            )]))
+            .with_record_count(1)
+            .with_file_size_in_bytes(1)
+            .with_column_sizes(None)
+            .with_value_counts(None)
+            .with_null_value_counts(None)
+            .with_nan_value_counts(None)
+            .with_distinct_counts(None)
+            .with_lower_bounds(None)
+            .with_upper_bounds(None)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn bounding_partition_values_skips_rectangle_for_null_partitions() {
+        let names: SmallVec<[&str; 4]> = SmallVec::from_slice(&["n"]);
+
+        let files = [data_file_at(Some(5)), data_file_at(Some(2))];
+        let bounds = bounding_partition_values(files.iter(), &names)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bounds.min.as_slice(), &[Value::LongInt(2)]);
+        assert_eq!(bounds.max.as_slice(), &[Value::LongInt(5)]);
+
+        let files = [data_file_at(Some(5)), data_file_at(None)];
+        assert_eq!(
+            bounding_partition_values(files.iter(), &names).unwrap(),
+            None
+        );
+
+        assert!(bounding_partition_values([].iter(), &names).is_err());
     }
 }

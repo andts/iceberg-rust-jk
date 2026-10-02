@@ -5,11 +5,12 @@ use iceberg_rust_spec::manifest_list::ManifestListEntry;
 use crate::{
     error::Error,
     table::manifest_list::{append_manifest, ManifestListReader, RowIdAssigner},
-    util::{summary_to_rectangle, Rectangle},
+    util::{summary_bounds, Rectangle},
 };
 
 pub(crate) struct OverwriteManifest {
-    pub manifest: ManifestListEntry,
+    /// `None` if no existing manifest can take the new files.
+    pub manifest: Option<ManifestListEntry>,
     pub file_count_all_entries: usize,
     pub manifests_to_overwrite: Vec<ManifestListEntry>,
 }
@@ -29,15 +30,28 @@ pub(crate) fn select_manifest_without_overwrites_partitioned(
     for manifest_res in manifest_list_reader {
         let manifest = manifest_res?;
 
-        let mut bounds =
-            summary_to_rectangle(manifest.partitions.as_ref().ok_or(Error::NotFound(format!(
-                "Partition struct in manifest {}",
-                manifest.manifest_path
-            )))?)?;
-
-        bounds.expand(bounding_partition_values);
+        let summaries = manifest.partitions.as_ref().ok_or(Error::NotFound(format!(
+            "Partition struct in manifest {}",
+            manifest.manifest_path
+        )))?;
 
         file_count_all_entries += manifest.added_files_count.unwrap_or(0) as usize;
+
+        // A manifest without bounds (all-null partition column) can't be compared.
+        let Some(mut bounds) = summary_bounds(summaries) else {
+            if overwrites.contains(&manifest.manifest_path) {
+                manifests_to_overwrite.push(manifest);
+            } else {
+                append_manifest(
+                    manifest_list_writer,
+                    row_id_assigner.as_deref_mut(),
+                    manifest,
+                )?;
+            }
+            continue;
+        };
+
+        bounds.expand(bounding_partition_values);
 
         let Some((selected_bounds, _)) = &selected_state else {
             selected_state = Some((bounds, manifest));
@@ -71,13 +85,11 @@ pub(crate) fn select_manifest_without_overwrites_partitioned(
             }
         }
     }
-    selected_state
-        .map(|(_, entry)| OverwriteManifest {
-            manifest: entry,
-            file_count_all_entries,
-            manifests_to_overwrite,
-        })
-        .ok_or(Error::NotFound("Manifest for insert".to_owned()))
+    Ok(OverwriteManifest {
+        manifest: selected_state.map(|(_, entry)| entry),
+        file_count_all_entries,
+        manifests_to_overwrite,
+    })
 }
 
 /// Select the manifest with the smallest number of rows.
@@ -132,7 +144,7 @@ pub(crate) fn select_manifest_without_overwrites_unpartitioned(
     }
     selected_state
         .map(|(_, entry)| OverwriteManifest {
-            manifest: entry,
+            manifest: Some(entry),
             file_count_all_entries,
             manifests_to_overwrite,
         })
