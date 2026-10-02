@@ -21,16 +21,11 @@ use std::{
     collections::{btree_map::Keys, BTreeMap, HashMap},
     fmt,
     hash::{DefaultHasher, Hash, Hasher},
-    io::Cursor,
     ops::Sub,
     slice::Iter,
 };
 
-use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
-use datetime::{
-    date_to_months, date_to_years, datetime_to_days, datetime_to_hours, datetime_to_months,
-    days_to_date, micros_to_datetime,
-};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use itertools::Itertools;
 use ordered_float::OrderedFloat;
 use serde::{
@@ -364,88 +359,66 @@ impl Hash for Struct {
 impl Value {
     /// Applies a partition transform to the value
     ///
-    /// # Arguments
-    /// * `transform` - The partition transform to apply
-    ///
-    /// # Returns
-    /// * `Ok(Value)` - The transformed value
-    /// * `Err(Error)` - If the transform cannot be applied to this value type
-    ///
-    /// Supported transforms include:
-    /// * Identity - Returns the value unchanged
-    /// * Bucket - Applies a hash function and returns bucket number
-    /// * Truncate - Truncates numbers or strings
-    /// * Year/Month/Day/Hour - Extracts time components from dates and timestamps
+    /// Follows the Iceberg spec (see [`super::transform`]). A decimal is
+    /// bucketed and truncated at its own scale, so cast it to the column's
+    /// scale first. `Transform::Void` has no value and returns
+    /// `Error::NotSupported`; width 0 returns `Error::InvalidFormat`.
     pub fn transform(&self, transform: &Transform) -> Result<Value, Error> {
-        match transform {
-            Transform::Identity => Ok(self.clone()),
-            Transform::Bucket(n) => {
-                let mut bytes = Cursor::new(<Value as Into<ByteBuf>>::into(self.clone()));
-                let hash = murmur3::murmur3_32(&mut bytes, 0).unwrap();
-                Ok(Value::Int((hash % n) as i32))
-            }
-            Transform::Truncate(w) => match self {
-                Value::Int(i) => Ok(Value::Int(i - i.rem_euclid(*w as i32))),
-                Value::LongInt(i) => Ok(Value::LongInt(i - i.rem_euclid(*w as i64))),
-                Value::String(s) => {
-                    let mut s = s.clone();
-                    s.truncate(*w as usize);
-                    Ok(Value::String(s))
-                }
-                _ => Err(Error::NotSupported(
-                    "Datatype for truncate partition transform.".to_string(),
-                )),
-            },
-            Transform::Year => match self {
-                Value::Date(date) => Ok(Value::Int(date_to_years(&days_to_date(*date)))),
-                Value::Timestamp(time) => Ok(Value::Int(
-                    micros_to_datetime(*time).year() - YEARS_BEFORE_UNIX_EPOCH,
-                )),
-                Value::TimestampTZ(time) => Ok(Value::Int(
-                    micros_to_datetime(*time).year() - YEARS_BEFORE_UNIX_EPOCH,
-                )),
-                _ => Err(Error::NotSupported(
-                    "Datatype for year partition transform.".to_string(),
-                )),
-            },
-            Transform::Month => match self {
-                Value::Date(date) => Ok(Value::Int(date_to_months(&days_to_date(*date)))),
-                Value::Timestamp(time) => {
-                    Ok(Value::Int(datetime_to_months(&micros_to_datetime(*time))))
-                }
-                Value::TimestampTZ(time) => {
-                    Ok(Value::Int(datetime_to_months(&micros_to_datetime(*time))))
-                }
-                _ => Err(Error::NotSupported(
-                    "Datatype for month partition transform.".to_string(),
-                )),
-            },
-            Transform::Day => match self {
-                Value::Date(date) => Ok(Value::Int(*date)),
-                Value::Timestamp(time) => Ok(Value::Int(
-                    datetime_to_days(&micros_to_datetime(*time)) as i32,
-                )),
-                Value::TimestampTZ(time) => Ok(Value::Int(datetime_to_days(&micros_to_datetime(
-                    *time,
-                )) as i32)),
-                _ => Err(Error::NotSupported(
-                    "Datatype for day partition transform.".to_string(),
-                )),
-            },
-            Transform::Hour => match self {
-                Value::Timestamp(time) => Ok(Value::Int(datetime_to_hours(&micros_to_datetime(
-                    *time,
-                )) as i32)),
-                Value::TimestampTZ(time) => Ok(Value::Int(datetime_to_hours(&micros_to_datetime(
-                    *time,
-                )) as i32)),
-                _ => Err(Error::NotSupported(
-                    "Datatype for hour partition transform.".to_string(),
-                )),
-            },
-            _ => Err(Error::NotSupported(
-                "Partition transform operation".to_string(),
+        use super::transform as t;
+
+        let unsupported = || Error::NotSupported(format!("{transform} transform of {self:?}"));
+        match (transform, self) {
+            (Transform::Bucket(0) | Transform::Truncate(0), _) => Err(Error::InvalidFormat(
+                format!("{transform} needs a width greater than zero"),
             )),
+            (Transform::Identity, value) => Ok(value.clone()),
+            (Transform::Bucket(n), value) => {
+                let hash = match value {
+                    Value::Int(v) | Value::Date(v) => t::hash_int(*v),
+                    Value::LongInt(v)
+                    | Value::Time(v)
+                    | Value::Timestamp(v)
+                    | Value::TimestampTZ(v) => t::hash_long(*v),
+                    Value::Decimal(v) => t::hash_decimal(decimal_mantissa(v)?),
+                    Value::String(v) => t::hash_str(v),
+                    Value::UUID(v) => t::hash_uuid(v),
+                    Value::Fixed(_, v) | Value::Binary(v) => t::hash_bytes(v),
+                    _ => return Err(unsupported()),
+                };
+                Ok(Value::Int(t::bucket(hash, *n)))
+            }
+            (Transform::Truncate(w), Value::Int(v)) => Ok(Value::Int(t::truncate_int(*v, *w))),
+            (Transform::Truncate(w), Value::LongInt(v)) => {
+                Ok(Value::LongInt(t::truncate_long(*v, *w)))
+            }
+            (Transform::Truncate(w), Value::Decimal(v)) => {
+                Ok(Value::Decimal(decimal_from_i128_with_scale(
+                    t::truncate_decimal(decimal_mantissa(v)?, *w),
+                    decimal_scale(v),
+                )?))
+            }
+            (Transform::Truncate(w), Value::String(v)) => {
+                Ok(Value::String(t::truncate_str(v, *w).to_owned()))
+            }
+            (Transform::Truncate(w), Value::Binary(v)) => {
+                Ok(Value::Binary(t::truncate_bytes(v, *w).to_vec()))
+            }
+            (Transform::Year, Value::Date(v)) => Ok(Value::Int(t::days_to_years(*v))),
+            (Transform::Month, Value::Date(v)) => Ok(Value::Int(t::days_to_months(*v))),
+            (Transform::Day, Value::Date(v)) => Ok(Value::Int(*v)),
+            (Transform::Year, Value::Timestamp(v) | Value::TimestampTZ(v)) => {
+                Ok(Value::Int(t::micros_to_years(*v)))
+            }
+            (Transform::Month, Value::Timestamp(v) | Value::TimestampTZ(v)) => {
+                Ok(Value::Int(t::micros_to_months(*v)))
+            }
+            (Transform::Day, Value::Timestamp(v) | Value::TimestampTZ(v)) => {
+                Ok(Value::Int(t::micros_to_days(*v)))
+            }
+            (Transform::Hour, Value::Timestamp(v) | Value::TimestampTZ(v)) => {
+                Ok(Value::Int(t::micros_to_hours(*v)))
+            }
+            _ => Err(unsupported()),
         }
     }
 
@@ -909,33 +882,6 @@ impl From<&Value> for JsonValue {
 }
 
 mod datetime {
-    #[inline]
-    pub(crate) fn date_to_years(date: &NaiveDate) -> i32 {
-        date.years_since(
-            // This is always the same and shouldn't fail
-            NaiveDate::from_ymd_opt(YEARS_BEFORE_UNIX_EPOCH, 1, 1).unwrap(),
-        )
-        .unwrap() as i32
-    }
-
-    #[inline]
-    pub(crate) fn date_to_months(date: &NaiveDate) -> i32 {
-        let years = date
-            .years_since(
-                // This is always the same and shouldn't fail
-                NaiveDate::from_ymd_opt(YEARS_BEFORE_UNIX_EPOCH, 1, 1).unwrap(),
-            )
-            .unwrap() as i32;
-        let months = date.month();
-        years * 12 + months as i32
-    }
-
-    #[inline]
-    pub(crate) fn datetime_to_months(date: &NaiveDateTime) -> i32 {
-        let years = date.year() - YEARS_BEFORE_UNIX_EPOCH;
-        let months = date.month();
-        years * 12 + months as i32
-    }
 
     #[inline]
     pub(crate) fn date_to_days(date: &NaiveDate) -> i32 {
@@ -983,6 +929,7 @@ mod datetime {
     }
 
     #[inline]
+    #[cfg(test)]
     pub(crate) fn datetime_to_days(time: &NaiveDateTime) -> i64 {
         time.signed_duration_since(
             // This is always the same and shouldn't fail
@@ -992,6 +939,7 @@ mod datetime {
     }
 
     #[inline]
+    #[cfg(test)]
     pub(crate) fn datetime_to_hours(time: &NaiveDateTime) -> i64 {
         time.signed_duration_since(
             // This is always the same and shouldn't fail
@@ -1000,9 +948,7 @@ mod datetime {
         .num_hours()
     }
 
-    use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
-
-    use super::YEARS_BEFORE_UNIX_EPOCH;
+    use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 
     #[inline]
     pub(crate) fn datetimetz_to_micros(time: &DateTime<Utc>) -> i64 {
@@ -1591,30 +1537,30 @@ mod tests {
     fn test_transform_month_date() {
         let value = Value::Date(19478);
         let result = value.transform(&Transform::Month).unwrap();
-        assert_eq!(result, Value::Int(641)); // 0-based month index
+        assert_eq!(result, Value::Int(640)); // 2023-05
 
         let value = Value::Date(19523);
         let result = value.transform(&Transform::Month).unwrap();
-        assert_eq!(result, Value::Int(642)); // 0-based month index
+        assert_eq!(result, Value::Int(641)); // 2023-06
 
         let value = Value::Date(19723);
         let result = value.transform(&Transform::Month).unwrap();
-        assert_eq!(result, Value::Int(649)); // 0-based month index
+        assert_eq!(result, Value::Int(648)); // 2024-01
     }
 
     #[test]
     fn test_transform_month_timestamp() {
         let value = Value::Timestamp(1682937000000000);
         let result = value.transform(&Transform::Month).unwrap();
-        assert_eq!(result, Value::Int(641)); // 0-based month index
+        assert_eq!(result, Value::Int(640));
 
         let value = Value::Timestamp(1686840330000000);
         let result = value.transform(&Transform::Month).unwrap();
-        assert_eq!(result, Value::Int(642)); // 0-based month index
+        assert_eq!(result, Value::Int(641));
 
         let value = Value::Timestamp(1704067200000000);
         let result = value.transform(&Transform::Month).unwrap();
-        assert_eq!(result, Value::Int(649)); // 0-based month index
+        assert_eq!(result, Value::Int(648));
     }
 
     #[test]
@@ -1689,6 +1635,114 @@ mod tests {
         let value = Value::Date(0);
         let result = value.transform(&Transform::Hour);
         assert!(matches!(result, Err(Error::NotSupported(_))));
+    }
+
+    #[test]
+    fn transform_bucket_matches_spec_for_every_type() {
+        use crate::spec::transform::{bucket, hash_long};
+        let cases = [
+            (Value::Int(34), 2017239379),
+            (Value::LongInt(34), 2017239379),
+            (Value::Date(17486), -653330422),
+            (Value::Time(81_068_000_000), -662762989),
+            (Value::Timestamp(1_510_871_468_000_000), -2047944441),
+            (Value::TimestampTZ(1_510_871_468_000_000), -2047944441),
+            (Value::String("iceberg".into()), 1210000089),
+            (
+                Value::UUID(Uuid::parse_str("f79c3e09-677c-4bbd-a479-3f349cb785e7").unwrap()),
+                1488055340,
+            ),
+            (Value::Fixed(4, vec![0, 1, 2, 3]), -188683207),
+            (Value::Binary(vec![0, 1, 2, 3]), -188683207),
+            (
+                Value::Decimal(decimal_from_i128_with_scale(1420, 2).unwrap()),
+                -500754589,
+            ),
+        ];
+        for (value, hash) in cases {
+            assert_eq!(
+                value.transform(&Transform::Bucket(10)).unwrap(),
+                Value::Int(bucket(hash, 10)),
+                "{value:?}"
+            );
+        }
+        assert_eq!(hash_long(34), 2017239379);
+    }
+
+    #[test]
+    fn transform_temporal_before_the_epoch() {
+        assert_eq!(
+            Value::Date(-1).transform(&Transform::Year).unwrap(),
+            Value::Int(-1)
+        );
+        assert_eq!(
+            Value::Date(-1).transform(&Transform::Month).unwrap(),
+            Value::Int(-1)
+        );
+        assert_eq!(
+            Value::Timestamp(-1).transform(&Transform::Day).unwrap(),
+            Value::Int(-1)
+        );
+        assert_eq!(
+            Value::Timestamp(-1).transform(&Transform::Hour).unwrap(),
+            Value::Int(-1)
+        );
+        assert_eq!(
+            Value::TimestampTZ(-1).transform(&Transform::Year).unwrap(),
+            Value::Int(-1)
+        );
+    }
+
+    #[test]
+    fn transform_truncate_all_supported_types() {
+        assert_eq!(
+            Value::String("éé".into())
+                .transform(&Transform::Truncate(1))
+                .unwrap(),
+            Value::String("é".into())
+        );
+        assert_eq!(
+            Value::Binary(vec![1, 2, 3])
+                .transform(&Transform::Truncate(2))
+                .unwrap(),
+            Value::Binary(vec![1, 2])
+        );
+        assert_eq!(
+            Value::Decimal(decimal_from_i128_with_scale(1065, 2).unwrap())
+                .transform(&Transform::Truncate(50))
+                .unwrap(),
+            Value::Decimal(decimal_from_i128_with_scale(1050, 2).unwrap())
+        );
+        assert_eq!(
+            Value::Int(-1).transform(&Transform::Truncate(10)).unwrap(),
+            Value::Int(-10)
+        );
+        assert_eq!(
+            Value::LongInt(-1)
+                .transform(&Transform::Truncate(10))
+                .unwrap(),
+            Value::LongInt(-10)
+        );
+    }
+
+    #[test]
+    fn transform_rejects_zero_width_and_void() {
+        assert!(matches!(
+            Value::Int(1).transform(&Transform::Bucket(0)),
+            Err(Error::InvalidFormat(_))
+        ));
+        assert!(matches!(
+            Value::Int(1).transform(&Transform::Truncate(0)),
+            Err(Error::InvalidFormat(_))
+        ));
+        assert!(matches!(
+            Value::Int(1).transform(&Transform::Void),
+            Err(Error::NotSupported(_))
+        ));
+        assert!(matches!(
+            Value::Boolean(true).transform(&Transform::Bucket(4)),
+            Err(Error::NotSupported(_))
+        ));
     }
 
     #[test]
@@ -2186,34 +2240,6 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    #[ignore = "datetime_to_months is off-by-one (1-indexed month vs spec's 0-indexed); year/day/hour pass but the whole convertNanos counterpart aborts on the month assertion"]
-    fn test_datetime_micros_year_month_day_hour_helpers_for_positive_instant() {
-        // Instant 2017-11-16T22:31:08.000001 (micros = 1_510_871_468_000_001).
-        // Bucket helpers should match the spec values for the same wall-clock instant:
-        // years=47, months=574, days=17486, hours=419686.
-        let micros: i64 = 1_510_871_468_000_001;
-        let dt = datetime::micros_to_datetime(micros);
-        assert_eq!(datetime::date_to_years(&dt.date()), 47);
-        assert_eq!(datetime::datetime_to_months(&dt), 574);
-        assert_eq!(datetime::datetime_to_days(&dt), 17486);
-        assert_eq!(datetime::datetime_to_hours(&dt), 419686);
-    }
-
-    #[test]
-    #[ignore = "datetime_to_months is off-by-one for the negative branch too"]
-    fn test_datetime_micros_year_month_day_hour_helpers_floor_for_pre_epoch_instant() {
-        // Pre-epoch instant 1922-02-15T01:28:51.999999 (micros = -1_510_871_468_000_001).
-        // Floor (Euclidean) division produces the lower bucket for non-aligned negatives:
-        // years=-48, months=-575, days=-17487, hours=-419687.
-        let micros: i64 = -1_510_871_468_000_001;
-        let dt = datetime::micros_to_datetime(micros);
-        assert_eq!(datetime::date_to_years(&dt.date()), -48);
-        assert_eq!(datetime::datetime_to_months(&dt), -575);
-        assert_eq!(datetime::datetime_to_days(&dt), -17487);
-        assert_eq!(datetime::datetime_to_hours(&dt), -419687);
-    }
-
-    #[test]
     fn test_datetime_micros_hours_div_24_equals_days_for_positive_instant() {
         // For any positive instant, the hour-bucket divided by 24 yields the day-bucket.
         let dt = datetime::micros_to_datetime(1_750_000_500_000_001);
@@ -2302,8 +2328,7 @@ mod tests {
     fn test_truncate_int_zero_width_panics_and_negative_width_unreachable_at_type_level() {
         // Rust's Transform::Truncate(u32) cannot carry a negative width by construction
         // (the upstream contract requires a runtime check; in Rust the type system enforces it).
-        // Width=0 makes the implementation call i32::rem_euclid(0), which panics — semantic
-        // equivalent of Java's IllegalArgumentException.
+        // Width=0 returns an InvalidFormat error — semantic equivalent of Java's IllegalArgumentException.
         let size_of_u32 = std::mem::size_of::<u32>();
         assert_eq!(
             size_of_u32, 4,
@@ -2311,8 +2336,11 @@ mod tests {
         );
 
         let value = Value::Int(100);
-        let result = std::panic::catch_unwind(|| value.transform(&Transform::Truncate(0)));
-        assert!(result.is_err(), "truncate with width=0 should panic");
+        let result = value.transform(&Transform::Truncate(0));
+        assert!(
+            matches!(result, Err(Error::InvalidFormat(_))),
+            "truncate with width=0 should return InvalidFormat error"
+        );
     }
 
     #[test]

@@ -658,7 +658,7 @@ impl Type {
             Transform::Month => Ok(Type::Primitive(PrimitiveType::Int)),
             Transform::Day => Ok(Type::Primitive(PrimitiveType::Int)),
             Transform::Hour => Ok(Type::Primitive(PrimitiveType::Int)),
-            Transform::Void => Err(Error::NotSupported("void transform".to_string())),
+            Transform::Void => Ok(self.clone()),
         }
     }
 }
@@ -1721,5 +1721,11 @@ mod tests {
         ]);
 
         assert_eq!(roundtrip(&top), top);
+    }
+
+    #[test]
+    fn void_transform_keeps_the_source_type() {
+        let source = Type::Primitive(PrimitiveType::Date);
+        assert_eq!(source.tranform(&Transform::Void).unwrap(), source);
     }
 }
