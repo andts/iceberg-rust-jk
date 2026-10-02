@@ -1744,7 +1744,8 @@ async fn write_parquet_files(
 
     let sink = ParquetSink::new(config, table_parquet_options);
 
-    let (demux_task, file_receiver) = start_demuxer_task(metadata, batches, context)?;
+    let (demux_task, file_receiver, values_by_path) =
+        start_demuxer_task(metadata, batches, context)?;
 
     sink.spawn_writer_tasks_and_join(context, demux_task, file_receiver, object_store.clone())
         .await?;
@@ -1759,6 +1760,12 @@ async fn write_parquet_files(
             .await
             .map_err(DataFusionIcebergError::from)?
             .size;
+        let partition_values = values_by_path.lock().unwrap().get(&path).cloned();
+        if !partition_fields.is_empty() && partition_values.is_none() {
+            return Err(DataFusionError::Internal(format!(
+                "no partition values were recorded for written file {path}"
+            )));
+        }
         datafiles.push(
             parquet_to_datafile(
                 &(bucket.to_string() + "/" + path.as_ref()),
@@ -1766,6 +1773,7 @@ async fn write_parquet_files(
                 &file,
                 schema,
                 &partition_fields,
+                partition_values.as_deref(),
                 equality_ids,
                 &metadata.properties,
             )
@@ -1775,17 +1783,23 @@ async fn write_parquet_files(
     Ok(datafiles)
 }
 
+/// Partition tuple of each file the demuxer opened, keyed by its path.
+pub(crate) type PartitionValuesByPath =
+    Arc<std::sync::Mutex<HashMap<object_store::path::Path, Vec<Option<Value>>>>>;
+
+/// The demuxer task, its output receiver and the partition tuple of each file it opens.
+pub(crate) type DemuxerParts = (
+    SpawnedTask<Result<(), DataFusionError>>,
+    DemuxedStreamReceiver,
+    PartitionValuesByPath,
+);
+
 pub(crate) fn start_demuxer_task(
     metadata: &TableMetadata,
     data: SendableRecordBatchStream,
     context: &Arc<TaskContext>,
-) -> Result<
-    (
-        SpawnedTask<Result<(), DataFusionError>>,
-        DemuxedStreamReceiver,
-    ),
-    DataFusionError,
-> {
+) -> Result<DemuxerParts, DataFusionError> {
+    let values_by_path = PartitionValuesByPath::default();
     let (tx, rx) = mpsc::unbounded_channel();
     let context = Arc::clone(context);
     let partition_spec = metadata
@@ -1808,15 +1822,24 @@ pub(crate) fn start_demuxer_task(
                 .clone();
             let location = metadata.location.clone();
             let hash_map = metadata.properties.clone();
+            let values_by_path = values_by_path.clone();
             async move {
                 let partition_fields = table_metadata::partition_fields(&partition_spec, &schema)
                     .map_err(DataFusionIcebergError::from)?;
-                partitions_demuxer(tx, data, &partition_fields, &hash_map, &location).await
+                partitions_demuxer(
+                    tx,
+                    data,
+                    &partition_fields,
+                    &hash_map,
+                    &location,
+                    values_by_path,
+                )
+                .await
             }
         })
     };
 
-    Ok((task, rx))
+    Ok((task, rx, values_by_path))
 }
 
 async fn partitions_demuxer(
@@ -1825,6 +1848,7 @@ async fn partitions_demuxer(
     partition_fields: &[BoundPartitionField<'_>],
     table_properties: &HashMap<String, String>,
     table_location: &str,
+    values_by_path: PartitionValuesByPath,
 ) -> Result<(), DataFusionError> {
     let mut senders: LruCache<Vec<Option<Value>>, mpsc::Sender<RecordBatch>> =
         LruCache::unbounded();
@@ -1863,8 +1887,13 @@ async fn partitions_demuxer(
                 };
                 let data_location = table_location.trim_end_matches('/').to_string() + "/data/";
                 let path = generate_file_path(&data_location, partition_path);
+                let path: object_store::path::Path = path.into();
+                values_by_path
+                    .lock()
+                    .unwrap()
+                    .insert(path.clone(), partition_values.clone());
                 partition_sender
-                    .send((path.into(), reciever))
+                    .send((path, reciever))
                     .map_err(DataFusionIcebergError::from)?;
             };
         }

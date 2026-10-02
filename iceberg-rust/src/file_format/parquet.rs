@@ -57,8 +57,18 @@ pub fn attested_sort_order_id(file_metadata: &ParquetMetaData) -> Option<i32> {
         .and_then(|value| value.parse::<i32>().ok())
 }
 
-/// Read datafile statistics from parquetfile
-#[instrument(name = "iceberg_rust::file_format::parquet::parquet_to_datafile", level = "debug", skip(file_metadata, schema, partition_fields, table_properties), fields(
+/// Read datafile statistics from parquetfile.
+///
+/// `partition_values` is the partition tuple the file was written for, one
+/// entry per partition field (`None` entries are NULL partition values). With
+/// `Some`, the tuple is recorded as given and its length must match
+/// `partition_fields`. With `None`, the tuple is derived from the column
+/// statistics, which only works when every row group has exact statistics
+/// (some writers never mark byte-array statistics exact), one transformed value
+/// and no nulls mixed with values; otherwise `Error::InvalidFormat` is
+/// returned. A column with no statistics yields NULL only if every row is null.
+#[allow(clippy::too_many_arguments)]
+#[instrument(name = "iceberg_rust::file_format::parquet::parquet_to_datafile", level = "debug", skip(file_metadata, schema, partition_fields, partition_values, table_properties), fields(
     location = location,
     file_size = file_size,
     partition_field_count = partition_fields.len(),
@@ -70,16 +80,36 @@ pub fn parquet_to_datafile(
     file_metadata: &ParquetMetaData,
     schema: &Schema,
     partition_fields: &[BoundPartitionField<'_>],
+    partition_values: Option<&[Option<Value>]>,
     equality_ids: Option<&[i32]>,
     table_properties: &HashMap<String, String>,
 ) -> Result<DataFile, Error> {
     let write_distinct_counts = table_properties
         .get(WRITE_METADATA_METRICS_DISTINCT_COUNTS_ENABLED)
         .is_some_and(|x| x == "true");
-    let mut partition = partition_fields
-        .iter()
-        .map(|field| Ok((field.name().to_owned(), None)))
-        .collect::<Result<Struct, Error>>()?;
+    if let Some(values) = partition_values {
+        if values.len() != partition_fields.len() {
+            return Err(Error::InvalidFormat(format!(
+                "{location}: {} partition values given for {} partition fields",
+                values.len(),
+                partition_fields.len()
+            )));
+        }
+    }
+    let mut partition = match partition_values {
+        Some(values) => partition_fields
+            .iter()
+            .zip(values)
+            .map(|(field, value)| (field.name().to_owned(), value.clone()))
+            .collect::<Struct>(),
+        None => partition_fields
+            .iter()
+            .map(|field| (field.name().to_owned(), None))
+            .collect::<Struct>(),
+    };
+    let derive_partition = partition_values.is_none();
+    // Null counts of partition source columns, for the derivation check below.
+    let mut partition_source_null_counts: HashMap<String, i64> = HashMap::new();
     let partition_fields = partition_fields
         .iter()
         .map(|field| {
@@ -361,38 +391,72 @@ pub fn parquet_to_datafile(
                     }
                 }
 
-                if let Some(partition_field) = partition_fields.get(column_name) {
-                    if let Some(partition_value) = partition.get_mut(partition_field.name()) {
-                        if partition_value.is_none() {
-                            let partition_field = partition_fields
-                                .get(column_name)
-                                .ok_or_else(|| Error::InvalidFormat("transform".to_string()))?;
-                            if let (Some(min_bytes), Some(max_bytes)) =
-                                (statistics.min_bytes_opt(), statistics.max_bytes_opt())
-                            {
-                                let min = Value::try_from_bytes_with_hint(
-                                    min_bytes,
-                                    data_type,
-                                    physical_type_hint,
-                                )?
-                                .transform(partition_field.transform())?;
-                                let max = Value::try_from_bytes_with_hint(
-                                    max_bytes,
-                                    data_type,
-                                    physical_type_hint,
-                                )?
-                                .transform(partition_field.transform())?;
-                                if min == max {
-                                    *partition_value = Some(min)
-                                } else {
-                                    return Err(Error::InvalidFormat(
-                                        "Partition value of data file".to_owned(),
-                                    ));
+                if let Some(partition_field) = partition_fields
+                    .get(column_name)
+                    .filter(|_| derive_partition)
+                {
+                    *partition_source_null_counts
+                        .entry(column_name.to_owned())
+                        .or_default() += statistics.null_count_opt().unwrap_or(0) as i64;
+                    if let (Some(min_bytes), Some(max_bytes)) =
+                        (statistics.min_bytes_opt(), statistics.max_bytes_opt())
+                    {
+                        if !(statistics.min_is_exact() && statistics.max_is_exact()) {
+                            return Err(Error::InvalidFormat(format!(
+                                "cannot derive the partition value of {location}: statistics of column {column_name} are truncated"
+                            )));
+                        }
+                        let transform = partition_field.transform();
+                        let min = Value::try_from_bytes_with_hint(
+                            min_bytes,
+                            data_type,
+                            physical_type_hint,
+                        )?
+                        .transform(transform)?;
+                        let max = Value::try_from_bytes_with_hint(
+                            max_bytes,
+                            data_type,
+                            physical_type_hint,
+                        )?
+                        .transform(transform)?;
+                        if min != max {
+                            return Err(Error::InvalidFormat(format!(
+                                "cannot derive the partition value of {location}: column {column_name} spans several partitions"
+                            )));
+                        }
+                        if let Some(value) = partition.get_mut(partition_field.name()) {
+                            match value {
+                                Some(current) if *current != min => {
+                                    return Err(Error::InvalidFormat(format!(
+                                        "cannot derive the partition value of {location}: column {column_name} spans several partitions"
+                                    )));
                                 }
+                                _ => *value = Some(min),
                             }
                         }
                     }
                 }
+            }
+        }
+    }
+    if derive_partition {
+        let num_rows = file_metadata.file_metadata().num_rows();
+        for (source_name, partition_field) in &partition_fields {
+            let unset = matches!(partition.get(partition_field.name()), Some(None));
+            let all_null = partition_source_null_counts.get(source_name) == Some(&num_rows);
+            if unset && !all_null {
+                return Err(Error::InvalidFormat(format!(
+                    "cannot derive the partition value of {location}: column {source_name} has no statistics"
+                )));
+            }
+            if !unset
+                && partition_source_null_counts
+                    .get(source_name)
+                    .is_some_and(|nulls| *nulls > 0)
+            {
+                return Err(Error::InvalidFormat(format!(
+                    "cannot derive the partition value of {location}: column {source_name} spans several partitions (it holds nulls and values)"
+                )));
             }
         }
     }
@@ -579,6 +643,8 @@ mod metrics_mode_tests {
     use arrow::array::{ArrayRef, StringArray};
     use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use arrow::record_batch::RecordBatch;
+    use iceberg_rust_spec::partition::BoundPartitionField;
+    use iceberg_rust_spec::spec::partition::{PartitionField, Transform};
     use iceberg_rust_spec::spec::schema::Schema;
     use iceberg_rust_spec::spec::types::{PrimitiveType, StructField, Type};
     use iceberg_rust_spec::spec::values::Value;
@@ -586,6 +652,7 @@ mod metrics_mode_tests {
         WRITE_METADATA_METRICS_COLUMN_PREFIX, WRITE_METADATA_METRICS_DEFAULT,
     };
     use parquet::arrow::ArrowWriter;
+    use parquet::file::metadata::ParquetMetaData;
     use parquet::file::reader::{FileReader, SerializedFileReader};
 
     use super::parquet_to_datafile;
@@ -650,6 +717,7 @@ mod metrics_mode_tests {
             &parquet_metadata,
             &schema(),
             &[],
+            None,
             None,
             &properties,
         )
@@ -724,6 +792,201 @@ mod metrics_mode_tests {
         // `counts` gives the other column counts but no bounds.
         assert_eq!(bound(datafile.lower_bounds(), 0), None);
         assert!(datafile.value_counts().as_ref().unwrap().get(&0).is_some());
+    }
+
+    /// One Utf8 column `s` (field id 1) holding `values`.
+    fn string_file(values: Vec<Option<&str>>) -> (Schema, u64, ParquetMetaData) {
+        let schema = Schema::builder()
+            .with_struct_field(StructField::new(
+                1,
+                "s",
+                false,
+                Type::Primitive(PrimitiveType::String),
+                None,
+            ))
+            .build()
+            .unwrap();
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "s",
+            DataType::Utf8,
+            true,
+        )]));
+        let batch = RecordBatch::try_new(
+            arrow_schema.clone(),
+            vec![Arc::new(StringArray::from(values))],
+        )
+        .unwrap();
+        let mut buffer = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut buffer, arrow_schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let size = buffer.len() as u64;
+        let reader = SerializedFileReader::new(bytes::Bytes::from(buffer)).unwrap();
+        (schema, size, reader.metadata().clone())
+    }
+
+    fn identity_on_s(schema: &Schema) -> (PartitionField, StructField) {
+        let source = schema.fields().get(1).unwrap().clone();
+        (
+            PartitionField::new(1, 1000, "s", Transform::Identity),
+            source,
+        )
+    }
+
+    #[test]
+    fn explicit_partition_values_are_used_as_given() {
+        let long = "x".repeat(100);
+        let (schema, size, metadata) = string_file(vec![Some(long.as_str())]);
+        let (field, source) = identity_on_s(&schema);
+        let bound = [BoundPartitionField::new(&field, &source)];
+        let values = [Some(Value::String(long.clone()))];
+        let datafile = parquet_to_datafile(
+            "/t/data/1.parquet",
+            size,
+            &metadata,
+            &schema,
+            &bound,
+            Some(&values),
+            None,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            datafile.partition().get("s"),
+            Some(&Some(Value::String(long)))
+        );
+    }
+
+    fn derive_err(schema: &Schema, size: u64, metadata: &ParquetMetaData) -> String {
+        let (field, source) = identity_on_s(schema);
+        let bound = [BoundPartitionField::new(&field, &source)];
+        parquet_to_datafile(
+            "/t/data/1.parquet",
+            size,
+            metadata,
+            schema,
+            &bound,
+            None,
+            None,
+            &HashMap::new(),
+        )
+        .unwrap_err()
+        .to_string()
+    }
+
+    /// Writes `groups` as separate row groups, optionally with statistics off.
+    fn string_file_groups(
+        groups: Vec<Vec<Option<&str>>>,
+        stats: parquet::file::properties::EnabledStatistics,
+    ) -> (Schema, u64, ParquetMetaData) {
+        let (schema, _, _) = string_file(vec![Some("a")]);
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "s",
+            DataType::Utf8,
+            true,
+        )]));
+        let props = parquet::file::properties::WriterProperties::builder()
+            .set_statistics_enabled(stats)
+            .build();
+        let mut buffer = Vec::new();
+        let mut writer =
+            ArrowWriter::try_new(&mut buffer, arrow_schema.clone(), Some(props)).unwrap();
+        for group in groups {
+            let batch = RecordBatch::try_new(
+                arrow_schema.clone(),
+                vec![Arc::new(StringArray::from(group))],
+            )
+            .unwrap();
+            writer.write(&batch).unwrap();
+            writer.flush().unwrap();
+        }
+        writer.close().unwrap();
+        let size = buffer.len() as u64;
+        let reader = SerializedFileReader::new(bytes::Bytes::from(buffer)).unwrap();
+        (schema, size, reader.metadata().clone())
+    }
+
+    #[test]
+    fn derived_partition_values_reject_different_row_groups() {
+        use parquet::file::properties::EnabledStatistics;
+        let (schema, size, metadata) = string_file_groups(
+            vec![vec![Some("A")], vec![Some("B")]],
+            EnabledStatistics::Chunk,
+        );
+        assert_eq!(metadata.num_row_groups(), 2);
+        assert!(derive_err(&schema, size, &metadata).contains("spans several partitions"));
+    }
+
+    #[test]
+    fn derived_partition_values_reject_a_partly_null_column() {
+        let (schema, size, metadata) = string_file(vec![Some("x"), None]);
+        assert!(derive_err(&schema, size, &metadata).contains("spans several partitions"));
+    }
+
+    #[test]
+    fn derived_partition_values_reject_missing_statistics() {
+        use parquet::file::properties::EnabledStatistics;
+        let (schema, size, metadata) =
+            string_file_groups(vec![vec![Some("x")]], EnabledStatistics::None);
+        assert!(derive_err(&schema, size, &metadata).contains("has no statistics"));
+    }
+
+    #[test]
+    fn explicit_partition_values_must_match_the_field_count() {
+        let (schema, size, metadata) = string_file(vec![Some("x")]);
+        let (field, source) = identity_on_s(&schema);
+        let bound = [BoundPartitionField::new(&field, &source)];
+        let err = parquet_to_datafile(
+            "/t/data/1.parquet",
+            size,
+            &metadata,
+            &schema,
+            &bound,
+            Some(&[]),
+            None,
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("partition values"));
+    }
+
+    #[test]
+    fn derived_partition_values_reject_truncated_statistics() {
+        let long = "x".repeat(100); // parquet truncates statistics to 64 bytes
+        let (schema, size, metadata) = string_file(vec![Some(long.as_str())]);
+        let (field, source) = identity_on_s(&schema);
+        let bound = [BoundPartitionField::new(&field, &source)];
+        let err = parquet_to_datafile(
+            "/t/data/1.parquet",
+            size,
+            &metadata,
+            &schema,
+            &bound,
+            None,
+            None,
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("truncated"), "{err}");
+    }
+
+    #[test]
+    fn derived_partition_value_is_null_for_an_all_null_column() {
+        let (schema, size, metadata) = string_file(vec![None, None]);
+        let (field, source) = identity_on_s(&schema);
+        let bound = [BoundPartitionField::new(&field, &source)];
+        let datafile = parquet_to_datafile(
+            "/t/data/1.parquet",
+            size,
+            &metadata,
+            &schema,
+            &bound,
+            None,
+            None,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(datafile.partition().get("s"), Some(&None));
     }
 }
 

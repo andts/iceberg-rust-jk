@@ -152,6 +152,7 @@ fn write_and_extract(
         schema,
         partition_fields,
         None,
+        None,
         &HashMap::new(),
     )
 }
