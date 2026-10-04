@@ -11,10 +11,14 @@ use std::sync::Arc;
 use datafusion::arrow::array::{Array, ArrayRef, Int64Array, RecordBatch};
 use datafusion::arrow::datatypes::{Field, Schema};
 use datafusion::arrow::util::pretty::pretty_format_batches;
-use datafusion::common::tree_node::{TransformedResult, TreeNode};
+use datafusion::common::tree_node::{TransformedResult, TreeNode, TreeNodeRecursion};
+use datafusion::datasource::physical_plan::FileScanConfig;
+use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::context::SessionContext;
 use datafusion::execution::SessionStateBuilder;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion_iceberg::catalog::catalog_list::IcebergCatalogList;
+use datafusion_iceberg::object_store_url_for_location;
 use datafusion_iceberg::planner::{iceberg_transform, IcebergQueryPlanner};
 use iceberg_rust::object_store::ObjectStoreBuilder;
 use iceberg_sql_catalog::SqlCatalogList;
@@ -70,6 +74,39 @@ async fn run(ctx: &SessionContext, sql: &str) -> Vec<RecordBatch> {
         .collect()
         .await
         .unwrap_or_else(|e| panic!("collect `{sql}`: {e}"))
+}
+
+/// Plan `sql` the way `run` does, without executing it.
+async fn physical_plan(ctx: &SessionContext, sql: &str) -> Arc<dyn ExecutionPlan> {
+    let plan = ctx
+        .state()
+        .create_logical_plan(sql)
+        .await
+        .unwrap_or_else(|e| panic!("plan `{sql}`: {e}"));
+    let plan = plan
+        .transform(iceberg_transform)
+        .data()
+        .unwrap_or_else(|e| panic!("iceberg_transform `{sql}`: {e}"));
+    ctx.state()
+        .create_physical_plan(&plan)
+        .await
+        .unwrap_or_else(|e| panic!("physical plan `{sql}`: {e}"))
+}
+
+/// The object store URL of every file scan in `plan`.
+fn scan_store_urls(plan: &Arc<dyn ExecutionPlan>) -> Vec<String> {
+    let mut urls = Vec::new();
+    plan.apply(|node| {
+        if let Some(scan) = node
+            .downcast_ref::<DataSourceExec>()
+            .and_then(|exec| exec.data_source().downcast_ref::<FileScanConfig>())
+        {
+            urls.push(scan.object_store_url.as_str().to_owned());
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })
+    .unwrap();
+    urls
 }
 
 fn data_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -285,5 +322,33 @@ async fn sanitized_parquet_names_are_resolved_by_field_id() {
          values must land in their own column, unchanged and not cross-wired \
          with one another, proving the rewritten file -- not a cached copy --\
          was read:\n{out}"
+    );
+}
+
+/// Executors that receive a serialized plan register the table's store under
+/// `object_store_url_for_location(location)`; that only works if planned scans
+/// reference exactly that URL.
+#[tokio::test]
+async fn scans_reference_object_store_url_for_location() {
+    let dir = scratch("store-url");
+    let ctx = boot(&dir).await;
+    run(&ctx, "CREATE SCHEMA warehouse.ws").await;
+    run(
+        &ctx,
+        r#"CREATE EXTERNAL TABLE warehouse.ws.t (id BIGINT NOT NULL)
+           STORED AS ICEBERG LOCATION '/warehouse/ws/t'"#,
+    )
+    .await;
+    run(&ctx, "INSERT INTO warehouse.ws.t VALUES (1), (2)").await;
+
+    let plan = physical_plan(&ctx, "SELECT id FROM warehouse.ws.t").await;
+    let urls = scan_store_urls(&plan);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(!urls.is_empty(), "plan has no file scan");
+    let expected = object_store_url_for_location("/warehouse/ws/t");
+    assert!(
+        urls.iter().all(|url| url == expected.as_str()),
+        "every scan must reference {expected}, got {urls:?}"
     );
 }

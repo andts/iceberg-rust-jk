@@ -8,4 +8,4 @@ mod pruning_statistics;
 mod statistics;
 pub mod table;
 
-pub use crate::table::DataFusionTable;
+pub use crate::table::{object_store_url_for_location, DataFusionTable};

@@ -478,10 +478,18 @@ impl TableProvider for DataFusionTable {
     }
 }
 
-// Create a fake object store URL. Different table paths should produce fake URLs
-// that differ in the host name, because DF's DefaultObjectStoreRegistry only takes
-// hostname into account for object store keys
-fn fake_object_store_url(table_location_url: &str) -> ObjectStoreUrl {
+/// The object store URL `table_scan` registers a table's store under, and that
+/// scans of that table reference. Executors that receive serialized plans must
+/// register the table's `object_store()` under this URL before executing.
+///
+/// Different table locations map to different hosts, because DataFusion's
+/// `DefaultObjectStoreRegistry` keys stores by scheme and host only.
+///
+/// # Panics
+///
+/// If the escaped location is not a valid URL authority (a location containing
+/// `?` or `#`).
+pub fn object_store_url_for_location(table_location_url: &str) -> ObjectStoreUrl {
     // Use quasi url-encoding to escape the characters not allowed in host names, (i.e. for `/` use
     // `-2F` instead of `%2F`)
     ObjectStoreUrl::parse(format!(
@@ -522,7 +530,7 @@ async fn table_scan(
         .unwrap_or_else(|| table.current_schema().unwrap().clone());
 
     // Create a unique URI for this particular object store
-    let object_store_url = fake_object_store_url(&table.metadata().location);
+    let object_store_url = object_store_url_for_location(&table.metadata().location);
     session
         .runtime_env()
         .register_object_store(object_store_url.as_ref(), table.object_store());
@@ -1672,7 +1680,7 @@ async fn write_parquet_files(
 
     let bucket = Bucket::from_path(&metadata.location).map_err(DataFusionIcebergError::from)?;
 
-    let object_store_url = fake_object_store_url(&metadata.location);
+    let object_store_url = object_store_url_for_location(&metadata.location);
 
     context.runtime_env().register_object_store(
         &object_store_url
@@ -1970,7 +1978,9 @@ mod tests {
 
     use std::sync::Arc;
 
-    use crate::{catalog::catalog::IcebergCatalog, table::fake_object_store_url, DataFusionTable};
+    use crate::{
+        catalog::catalog::IcebergCatalog, table::object_store_url_for_location, DataFusionTable,
+    };
 
     #[test]
     fn rejects_inconsistent_deletion_vector_metadata() {
@@ -2083,7 +2093,7 @@ mod tests {
             .await
             .unwrap();
 
-        let object_store_url = fake_object_store_url("memory:///dv_row_number");
+        let object_store_url = object_store_url_for_location("memory:///dv_row_number");
         let ctx = SessionContext::new();
         ctx.runtime_env()
             .register_object_store(object_store_url.as_ref(), store);
@@ -3556,26 +3566,26 @@ mod tests {
     }
 
     #[test]
-    fn test_fake_object_store_url() {
+    fn test_object_store_url_for_location() {
         assert_eq!(
-            fake_object_store_url("s3://a"),
+            object_store_url_for_location("s3://a"),
             ObjectStoreUrl::parse("iceberg-rust://s3-3A-2F-2Fa").unwrap(),
         );
         assert_eq!(
-            fake_object_store_url("s3://a/b"),
+            object_store_url_for_location("s3://a/b"),
             ObjectStoreUrl::parse("iceberg-rust://s3-3A-2F-2Fa-2Fb").unwrap(),
         );
         assert_eq!(
-            fake_object_store_url("/warehouse/tpch/lineitem"),
+            object_store_url_for_location("/warehouse/tpch/lineitem"),
             ObjectStoreUrl::parse("iceberg-rust://-2Fwarehouse-2Ftpch-2Flineitem").unwrap()
         );
         assert_ne!(
-            fake_object_store_url("s3://a/-/--"),
-            fake_object_store_url("s3://a/--/-"),
+            object_store_url_for_location("s3://a/-/--"),
+            object_store_url_for_location("s3://a/--/-"),
         );
         assert_ne!(
-            fake_object_store_url("s3://a/table-2Fpath"),
-            fake_object_store_url("s3://a/table/path"),
+            object_store_url_for_location("s3://a/table-2Fpath"),
+            object_store_url_for_location("s3://a/table/path"),
         );
     }
 }
