@@ -1,7 +1,7 @@
 # `datafusion_iceberg`: Physical Plan Codec for Serialized Execution — Design / Handoff
 
 **Date:** 2026-10-04
-**Status:** Proposed (handoff — not implemented)
+**Status:** Implemented; builds against the local `datafusion-andts` checkout until the fork revision is pinned
 **Crate:** `datafusion_iceberg`
 **Base:** this fork at `eeac8ab`
 **Depends on:** the DataFusion change "Serialize `PhysicalExprAdapterFactory` in
@@ -271,11 +271,11 @@ state and yields wrong rows or decode failures unrelated to this change.
 
 ## Implementation checklist
 
-- [ ] `table/mod.rs`: `object_store_url_for_location` (public), call sites updated, re-export. A test pins that planned scans reference it.
-- [ ] Workspace `Cargo.toml`: fix the `#Local Changes` paths, add `datafusion-proto` to both sections; `datafusion_iceberg/Cargo.toml`: `proto` feature, optional dependency; `Makefile`: `--features proto`.
-- [ ] `table/mod.rs`: `pub(crate) mod expr_adapter;`.
-- [ ] `src/codec.rs` + `lib.rs` exports.
-- [ ] Tests 1–2.
+- [x] `table/mod.rs`: `object_store_url_for_location` (public), call sites updated, re-export. A test pins that planned scans reference it.
+- [x] Workspace `Cargo.toml`: fix the `#Local Changes` paths, add `datafusion-proto` to both sections; `datafusion_iceberg/Cargo.toml`: `proto` feature, optional dependency; `Makefile`: `--features proto`.
+- [x] `table/mod.rs`: `pub(crate) mod expr_adapter;`.
+- [x] `src/codec.rs` + `lib.rs` exports.
+- [x] Tests 1–2.
 - [ ] Switch back to the `#Fork` section at the pushed revision with the adapter codec hooks.
-- [ ] README/docs: one paragraph on shipping plans — enable `proto`, register
+- [x] README/docs: one paragraph on shipping plans — enable `proto`, register
       `IcebergPhysicalExtensionCodec`, register stores via `object_store_url_for_location`.
