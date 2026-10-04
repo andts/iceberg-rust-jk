@@ -3,7 +3,7 @@
 */
 
 mod dv_exec;
-mod expr_adapter;
+pub(crate) mod expr_adapter;
 
 use async_trait::async_trait;
 use chrono::DateTime;

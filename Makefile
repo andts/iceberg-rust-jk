@@ -7,7 +7,7 @@ test-iceberg-rust:
 	cargo test -p iceberg-rust --lib
 
 test-datafusion_iceberg:
-	cargo test -p datafusion_iceberg --tests -j 2
+	cargo test -p datafusion_iceberg --tests --features proto -j 2
 
 test-rest-catalog:
 	cargo test -p iceberg-rest-catalog --lib

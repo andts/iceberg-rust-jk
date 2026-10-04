@@ -9,12 +9,17 @@ license = "Apache-2.0"
 
 repository = "https://github.com/JanKaul/iceberg-rust"
 
+[features]
+# `IcebergPhysicalExtensionCodec`, for shipping physical plans with datafusion-proto.
+proto = ["dep:datafusion-proto"]
+
 [dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true }
 dashmap = "6.2.1"
 datafusion = { workspace = true }
 datafusion-expr = { workspace = true }
+datafusion-proto = { workspace = true, optional = true }
 derive_builder = { workspace = true }
 futures = { workspace = true }
 iceberg-rust = { path = "../iceberg-rust", version = "0.10.0" }
