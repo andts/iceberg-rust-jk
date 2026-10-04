@@ -216,9 +216,12 @@ fn rewrite_parquet(path: &std::path::Path, renames: &[(&str, &str)]) {
     std::fs::write(path, buf).unwrap();
 }
 
-#[tokio::test]
-async fn sanitized_parquet_names_are_resolved_by_field_id() {
-    let dir = scratch("sanitized");
+/// Create `warehouse.ws.t` (`id`, `my col`, `filler_column_with_a_very_long_name`)
+/// in a fresh scratch dir with rows (1, 10, 100) and (2, 20, 200). Then rewrite its
+/// data files the way iceberg-java names columns, adding 1000 to every value.
+/// Returns the scratch dir; open the table again with `boot`.
+async fn sanitized_table(tag: &str) -> std::path::PathBuf {
+    let dir = scratch(tag);
     let ctx = boot(&dir).await;
     run(&ctx, "CREATE SCHEMA warehouse.ws").await;
     run(
@@ -247,7 +250,50 @@ async fn sanitized_parquet_names_are_resolved_by_field_id() {
             ],
         );
     }
-    drop(ctx);
+    dir
+}
+
+/// `(id, my col, filler_column_with_a_very_long_name)` for every row, each
+/// value read from its own column by name.
+fn rows(batches: &[RecordBatch]) -> Vec<(i64, Option<i64>, Option<i64>)> {
+    let schema = batches[0].schema();
+    let id_idx = schema.index_of("id").expect("id column");
+    let my_col_idx = schema.index_of("my col").expect("`my col` column");
+    let filler_idx = schema
+        .index_of("filler_column_with_a_very_long_name")
+        .expect("filler column");
+
+    let mut rows = Vec::new();
+    for batch in batches {
+        let ids = batch
+            .column(id_idx)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("id is Int64");
+        let my_cols = batch
+            .column(my_col_idx)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("`my col` is Int64");
+        let fillers = batch
+            .column(filler_idx)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("filler column is Int64");
+        for i in 0..batch.num_rows() {
+            rows.push((
+                ids.value(i),
+                (!my_cols.is_null(i)).then(|| my_cols.value(i)),
+                (!fillers.is_null(i)).then(|| fillers.value(i)),
+            ));
+        }
+    }
+    rows
+}
+
+#[tokio::test]
+async fn sanitized_parquet_names_are_resolved_by_field_id() {
+    let dir = sanitized_table("sanitized").await;
 
     // Read from a *fresh* session, as an executor pod always is.
     let cold = boot(&dir).await;
@@ -279,38 +325,7 @@ async fn sanitized_parquet_names_are_resolved_by_field_id() {
     // fix would make `my col` resolve again (since `my_x20col` decodes back
     // to it) while leaving this column -- and any other non-whitespace
     // rename -- still reading back as NULL.
-    let schema = out_batches[0].schema();
-    let id_idx = schema.index_of("id").expect("id column");
-    let my_col_idx = schema.index_of("my col").expect("`my col` column");
-    let filler_idx = schema
-        .index_of("filler_column_with_a_very_long_name")
-        .expect("filler column");
-
-    let mut rows: Vec<(i64, Option<i64>, Option<i64>)> = Vec::new();
-    for batch in &out_batches {
-        let ids = batch
-            .column(id_idx)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .expect("id is Int64");
-        let my_cols = batch
-            .column(my_col_idx)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .expect("`my col` is Int64");
-        let fillers = batch
-            .column(filler_idx)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .expect("filler column is Int64");
-        for i in 0..batch.num_rows() {
-            rows.push((
-                ids.value(i),
-                (!my_cols.is_null(i)).then(|| my_cols.value(i)),
-                (!fillers.is_null(i)).then(|| fillers.value(i)),
-            ));
-        }
-    }
+    let rows = rows(&out_batches);
 
     assert_eq!(
         rows,
@@ -351,4 +366,88 @@ async fn scans_reference_object_store_url_for_location() {
         urls.iter().all(|url| url == expected.as_str()),
         "every scan must reference {expected}, got {urls:?}"
     );
+}
+
+/// A plan serialized where it was planned must read sanitized columns by field
+/// id where it is executed: the field-id adapter has to survive datafusion-proto.
+#[cfg(feature = "proto")]
+#[tokio::test]
+async fn serialized_plan_reads_sanitized_columns_by_field_id() {
+    use datafusion::physical_plan::collect;
+    use datafusion_iceberg::IcebergPhysicalExtensionCodec;
+    use datafusion_proto::bytes::{
+        physical_plan_from_bytes_with_extension_codec, physical_plan_to_bytes_with_extension_codec,
+    };
+    use datafusion_proto::physical_plan::{
+        ComposedPhysicalExtensionCodec, DefaultPhysicalExtensionCodec, PhysicalExtensionCodec,
+    };
+    use iceberg_rust::object_store::Bucket;
+
+    let dir = sanitized_table("roundtrip").await;
+    let planner = boot(&dir).await;
+    let plan = physical_plan(
+        &planner,
+        r#"SELECT id, "my col", filler_column_with_a_very_long_name
+           FROM warehouse.ws.t ORDER BY id"#,
+    )
+    .await;
+    let location = object_store_url_for_location("/warehouse/ws/t");
+    assert!(
+        scan_store_urls(&plan)
+            .iter()
+            .all(|url| url == location.as_str()),
+        "scans must reference {location}"
+    );
+
+    // Engines register codecs composed, so route through a composition.
+    let codec = ComposedPhysicalExtensionCodec::new(vec![
+        Arc::new(DefaultPhysicalExtensionCodec {}) as Arc<dyn PhysicalExtensionCodec>,
+        Arc::new(IcebergPhysicalExtensionCodec),
+    ]);
+
+    // Encode before executing: an executed plan carries runtime dynamic-filter
+    // state that would be shipped along with it.
+    let bytes = physical_plan_to_bytes_with_extension_codec(plan.clone(), &codec)
+        .expect("encode with the Iceberg codec");
+
+    // Without the Iceberg codec, serialization must refuse, not drop the adapter.
+    let err = physical_plan_to_bytes_with_extension_codec(
+        plan.clone(),
+        &DefaultPhysicalExtensionCodec {},
+    )
+    .expect_err("the default codec must not serialize the field-id adapter");
+    assert!(
+        err.to_string()
+            .contains("IcebergPhysicalExprAdapterFactory"),
+        "{err}"
+    );
+
+    // An executor: no catalog, only the table's store under the scan's URL. The
+    // store is the fixture's prefixed LocalFileSystem; table paths are
+    // `/warehouse/...` relative to the scratch dir.
+    let executor = SessionContext::new();
+    executor.runtime_env().register_object_store(
+        location.as_ref(),
+        ObjectStoreBuilder::filesystem(&dir)
+            .build(Bucket::Local)
+            .expect("filesystem store"),
+    );
+    let decoded =
+        physical_plan_from_bytes_with_extension_codec(&bytes, &executor.task_ctx(), &codec)
+            .expect("decode on the executor");
+
+    let expected = vec![
+        (1001, Some(1010), Some(1100)),
+        (1002, Some(1020), Some(1200)),
+    ];
+    let local = collect(plan, planner.task_ctx())
+        .await
+        .expect("execute locally");
+    let remote = collect(decoded, executor.task_ctx())
+        .await
+        .expect("execute the decoded plan");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(rows(&local), expected, "planning process");
+    assert_eq!(rows(&remote), expected, "executor, from the decoded plan");
 }
