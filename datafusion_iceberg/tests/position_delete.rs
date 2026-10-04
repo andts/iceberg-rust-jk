@@ -343,9 +343,9 @@ async fn applies_v2_position_deletes() {
         &batches
     );
 
-    // Shipped to an executor, the plan applies the same deletes. The table's
-    // paths are absolute (`/tmp/...`) and map keys are normalized, so this also
-    // checks that pruning normalizes the way IcebergDvExec looks up.
+    // Shipped to an executor, the plan applies the same deletes. (The table's
+    // paths have no scheme, so they are unchanged by normalization; pruning's
+    // normalization is covered by `codec::tests`.)
     #[cfg(feature = "proto")]
     assert_batches_eq!(
         [

@@ -209,13 +209,12 @@ contract).
 
 ## Out of scope (follow-ups)
 
-- **`IcebergDvExec`** (`table/dv_exec.rs`) is a custom `ExecutionPlan` with no
-  serialization. It applies both v3 deletion vectors and v2 position-delete files
-  (`table_scan` routes both into `dv_index`), which includes common Spark/Flink
-  merge-on-read v2 tables. Serialized since
-  `2026-10-04-dv-exec-serialization-design.md`. The same codec is the natural home for it
-  (`try_encode` / `try_decode`, payload = path-keyed deletion vectors plus column
-  indices); left out to keep this change focused.
+- **`IcebergDvExec`** (`table/dv_exec.rs`) is a custom `ExecutionPlan` that this
+  change does not serialize. It applies both v3 deletion vectors and v2
+  position-delete files (`table_scan` routes both into `dv_index`), which includes
+  common Spark/Flink merge-on-read v2 tables. It is serialized by the same codec
+  since `2026-10-04-dv-exec-serialization-design.md` (`try_encode` / `try_decode`;
+  payload = column names, strip flag, and path-keyed deletion vectors).
 - **`IcebergDataSink`** (`INSERT` plans, `table/mod.rs`) and **`PhysicalForkNode`**
   (materialized-view refresh, `materialized_view/delta_queries/fork_node.rs`) are
   likewise custom and unserializable. With the codec registered, all three fail

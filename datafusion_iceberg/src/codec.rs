@@ -33,9 +33,11 @@ const FIELD_ID_ADAPTER_V1: &[u8] = b"datafusion_iceberg/field-id-adapter/v1";
 const DV_EXEC_V1: &[u8] = b"datafusion_iceberg/dv-exec/v1\0";
 
 /// Serializes the parts of `datafusion_iceberg` physical plans that
-/// `datafusion-proto` cannot: currently the field-id expression adapter attached
-/// to every Iceberg file scan. Register it with whatever serializes plans
-/// (directly, or inside a `ComposedPhysicalExtensionCodec`).
+/// `datafusion-proto` cannot: the field-id expression adapter attached to every
+/// Iceberg file scan, and `IcebergDvExec`, which applies row-level deletes (each
+/// plan carries only the deletion vectors of the files it scans). Register it
+/// with whatever serializes plans (directly, or inside a
+/// `ComposedPhysicalExtensionCodec`).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct IcebergPhysicalExtensionCodec;
 
@@ -129,13 +131,18 @@ fn encode_dv_exec(exec: &IcebergDvExec, buf: &mut Vec<u8>) -> Result<()> {
 /// its child scans. An engine that splits a scan into tasks serializes each
 /// task's plan separately, so this keeps the shipped bytes close to the deletes
 /// actually applied. If the scanned files can't be determined, all are shipped.
+///
+/// Looks up the scanned files rather than filtering the whole map, so encoding
+/// every task of a split scan costs the number of files, not tasks × deletes.
 fn shipped_entries(exec: &IcebergDvExec) -> Vec<(&String, &DeletionVector)> {
-    let scanned = scanned_data_files(exec.input(), &exec.path_column_name());
-    let mut entries: Vec<_> = exec
-        .dvs()
-        .iter()
-        .filter(|(path, _)| scanned.as_ref().is_none_or(|files| files.contains(*path)))
-        .collect();
+    let dvs = exec.dvs();
+    let mut entries: Vec<_> = match scanned_data_files(exec.input(), &exec.path_column_name()) {
+        Some(files) => files
+            .iter()
+            .filter_map(|path| dvs.get_key_value(path))
+            .collect(),
+        None => dvs.iter().collect(),
+    };
     entries.sort_by(|a, b| a.0.cmp(b.0));
     entries
 }
@@ -446,6 +453,23 @@ mod tests {
             decode(b"datafusion_iceberg/dv-exec/v2", one_input).is_err(),
             "other version"
         );
+
+        // Corruptions that keep the payload's shape and reach its own checks.
+        // The strip flag follows the tag and the two length-prefixed column names.
+        let flag_at = (0..2).fold(super::DV_EXEC_V1.len(), |at, _| {
+            let len = u32::from_be_bytes(buf[at..at + 4].try_into().unwrap()) as usize;
+            at + 4 + len
+        });
+        let mut bad_flag = buf.clone();
+        bad_flag[flag_at] = 2;
+        let err = decode(&bad_flag, one_input).unwrap_err();
+        assert!(err.to_string().contains("invalid strip flag 2"), "{err}");
+        // The last byte belongs to the last deletion-vector blob (its CRC):
+        // same length, wrong contents.
+        let mut bad_blob = buf.clone();
+        *bad_blob.last_mut().unwrap() ^= 0xFF;
+        let err = decode(&bad_blob, one_input).unwrap_err();
+        assert!(err.to_string().contains("deletion vector of"), "{err}");
         assert!(decode(b"", &[child]).is_err(), "empty");
     }
 
