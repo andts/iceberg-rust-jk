@@ -1,7 +1,7 @@
 # `datafusion_iceberg`: Serialize `IcebergDvExec` for Shipped Plans — Design / Handoff
 
 **Date:** 2026-10-04
-**Status:** Proposed (handoff — not implemented)
+**Status:** Implemented on `feat/dv-exec-serialization`; builds against the local `datafusion-andts` checkout (`feat/proto-virtual-columns`), which is not pushed upstream yet
 **Crate:** `datafusion_iceberg` (feature `proto`)
 **Builds on:** `2026-10-04-physical-plan-codec-design.md` (branch
 `feat/physical-plan-codec`: `IcebergPhysicalExtensionCodec`,
@@ -216,10 +216,10 @@ Encode **before executing**: an executed plan carries runtime dynamic-filter sta
 
 ## Implementation checklist
 
-- [ ] DataFusion: virtual columns serialized (separate handoff, see Dependency).
-- [ ] Test 1 (gate, after the DataFusion fix); stop if it fails.
-- [ ] `dv_exec.rs`: `pub(crate)` accessors; `table/mod.rs`: `pub(crate) mod dv_exec;`.
-- [ ] `codec.rs`: encode (with pruning) / decode for `IcebergDvExec`; payload helpers.
-- [ ] Tests 2–7; update `tests/position_delete.rs` (it currently pins the failure).
-- [ ] README "shipping plans" section: drop the row-delete limitation; mention pruning.
-- [ ] `make test-datafusion_iceberg`; `cargo clippy --all-targets --all-features -- -D warnings`.
+- [x] DataFusion: virtual columns serialized (separate handoff, see Dependency).
+- [x] Test 1 (gate, after the DataFusion fix); stop if it fails.
+- [x] `dv_exec.rs`: `pub(crate)` accessors; `table/mod.rs`: `pub(crate) mod dv_exec;`.
+- [x] `codec.rs`: encode (with pruning) / decode for `IcebergDvExec`; payload helpers.
+- [x] Tests 2–7; update `tests/position_delete.rs` (it currently pins the failure).
+- [x] README "shipping plans" section: drop the row-delete limitation; mention pruning.
+- [x] `make test-datafusion_iceberg`; `cargo clippy --all-targets --all-features -- -D warnings`.
