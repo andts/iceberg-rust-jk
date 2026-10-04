@@ -1,19 +1,29 @@
 //! `PhysicalExtensionCodec` for plans produced by this crate.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use datafusion::common::{internal_err, not_impl_err, Result};
+use datafusion::common::{internal_datafusion_err, internal_err, not_impl_err, Result};
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr_adapter::PhysicalExprAdapterFactory;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_proto::physical_plan::{PhysicalExtensionCodec, PhysicalProtoConverterExtension};
+use iceberg_rust::spec::deletion_vector::DeletionVector;
 
+use crate::table::dv_exec::IcebergDvExec;
 use crate::table::expr_adapter::IcebergPhysicalExprAdapterFactory;
 
 /// Payload for `IcebergPhysicalExprAdapterFactory`. The factory is stateless, so
 /// the versioned tag is the whole encoding; a future stateful version gets a new
 /// tag and carries its state after it.
 const FIELD_ID_ADAPTER_V1: &[u8] = b"datafusion_iceberg/field-id-adapter/v1";
+
+/// Payload tag for `IcebergDvExec`. Layout after the tag (big-endian):
+/// path column name, row-number column name (each `u32` length + UTF-8),
+/// strip flag (`u8`), entry count (`u32`), then per entry the normalized
+/// data-file path and its `deletion-vector-v1` blob (each `u32` length +
+/// bytes), sorted by path.
+const DV_EXEC_V1: &[u8] = b"datafusion_iceberg/dv-exec/v1";
 
 /// Serializes the parts of `datafusion_iceberg` physical plans that
 /// `datafusion-proto` cannot: currently the field-id expression adapter attached
@@ -25,26 +35,38 @@ pub struct IcebergPhysicalExtensionCodec;
 impl PhysicalExtensionCodec for IcebergPhysicalExtensionCodec {
     fn try_decode(
         &self,
-        _buf: &[u8],
-        _inputs: &[Arc<dyn ExecutionPlan>],
+        buf: &[u8],
+        inputs: &[Arc<dyn ExecutionPlan>],
         _ctx: &TaskContext,
         _proto_converter: &dyn PhysicalProtoConverterExtension,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        not_impl_err!("IcebergPhysicalExtensionCodec does not decode plan nodes")
+        // Unknown payloads are an internal error: `ComposedPhysicalExtensionCodec`
+        // routes a payload back only to the codec that wrote it.
+        let Some(payload) = buf.strip_prefix(DV_EXEC_V1) else {
+            return internal_err!(
+                "unknown datafusion_iceberg plan payload ({} bytes)",
+                buf.len()
+            );
+        };
+        let [input] = inputs else {
+            return internal_err!("IcebergDvExec takes one input, got {}", inputs.len());
+        };
+        decode_dv_exec(payload, input)
     }
 
     fn try_encode(
         &self,
         node: Arc<dyn ExecutionPlan>,
-        _buf: &mut Vec<u8>,
+        buf: &mut Vec<u8>,
         _proto_converter: &dyn PhysicalProtoConverterExtension,
     ) -> Result<()> {
-        // Name the node: this is the error a user sees when a plan contains
-        // e.g. `IcebergDvExec`, which nothing can serialize yet.
-        not_impl_err!(
-            "IcebergPhysicalExtensionCodec does not encode plan node {}",
-            node.name()
-        )
+        match node.downcast_ref::<IcebergDvExec>() {
+            Some(exec) => encode_dv_exec(exec, buf),
+            None => not_impl_err!(
+                "IcebergPhysicalExtensionCodec does not encode plan node {}",
+                node.name()
+            ),
+        }
     }
 
     fn try_encode_expr_adapter_factory(
@@ -77,6 +99,114 @@ impl PhysicalExtensionCodec for IcebergPhysicalExtensionCodec {
     }
 }
 
+fn encode_dv_exec(exec: &IcebergDvExec, buf: &mut Vec<u8>) -> Result<()> {
+    // Build the payload apart from `buf` so a failed encode writes nothing.
+    let mut out = DV_EXEC_V1.to_vec();
+    put_bytes(&mut out, exec.path_column_name().as_bytes())?;
+    put_bytes(&mut out, exec.row_number_column_name().as_bytes())?;
+    out.push(u8::from(exec.strip_path_col()));
+    let entries = shipped_entries(exec);
+    put_len(&mut out, entries.len())?;
+    for (path, dv) in entries {
+        put_bytes(&mut out, path.as_bytes())?;
+        let blob = dv.to_bytes().map_err(|e| {
+            internal_datafusion_err!("IcebergDvExec: encoding the deletion vector of {path}: {e}")
+        })?;
+        put_bytes(&mut out, &blob)?;
+    }
+    buf.extend_from_slice(&out);
+    Ok(())
+}
+
+/// The deletion vectors `exec` ships, sorted by path.
+fn shipped_entries(exec: &IcebergDvExec) -> Vec<(&String, &DeletionVector)> {
+    let mut entries: Vec<_> = exec.dvs().iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    entries
+}
+
+fn decode_dv_exec(
+    payload: &[u8],
+    input: &Arc<dyn ExecutionPlan>,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    let mut reader = PayloadReader(payload);
+    let path_column = reader.string()?;
+    let row_number_column = reader.string()?;
+    let strip_path_col = match reader.u8()? {
+        0 => false,
+        1 => true,
+        flag => return internal_err!("IcebergDvExec payload: invalid strip flag {flag}"),
+    };
+    let count = reader.len()?;
+    let dvs = (0..count)
+        .map(|_| {
+            let path = reader.string()?;
+            let dv = DeletionVector::try_from(reader.bytes()?).map_err(|e| {
+                internal_datafusion_err!("IcebergDvExec payload: deletion vector of {path}: {e}")
+            })?;
+            Ok((path, dv))
+        })
+        .collect::<Result<HashMap<_, _>>>()?;
+    if !reader.0.is_empty() {
+        return internal_err!("IcebergDvExec payload: {} trailing bytes", reader.0.len());
+    }
+    Ok(Arc::new(IcebergDvExec::try_new(
+        Arc::clone(input),
+        Arc::new(dvs),
+        &path_column,
+        &row_number_column,
+        strip_path_col,
+    )?))
+}
+
+fn put_len(out: &mut Vec<u8>, len: usize) -> Result<()> {
+    let len = u32::try_from(len).map_err(|_| {
+        internal_datafusion_err!("IcebergDvExec payload field of {len} exceeds u32")
+    })?;
+    out.extend_from_slice(&len.to_be_bytes());
+    Ok(())
+}
+
+fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
+    put_len(out, bytes.len())?;
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+/// Reads the `IcebergDvExec` payload; every read fails, rather than panics,
+/// on a truncated payload.
+struct PayloadReader<'a>(&'a [u8]);
+
+impl<'a> PayloadReader<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+        if self.0.len() < n {
+            return internal_err!("IcebergDvExec payload is truncated");
+        }
+        let (head, rest) = self.0.split_at(n);
+        self.0 = rest;
+        Ok(head)
+    }
+
+    fn u8(&mut self) -> Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn len(&mut self) -> Result<usize> {
+        let bytes: [u8; 4] = self.take(4)?.try_into().expect("took 4 bytes");
+        Ok(u32::from_be_bytes(bytes) as usize)
+    }
+
+    fn bytes(&mut self) -> Result<&'a [u8]> {
+        let n = self.len()?;
+        self.take(n)
+    }
+
+    fn string(&mut self) -> Result<String> {
+        String::from_utf8(self.bytes()?.to_vec())
+            .map_err(|e| internal_datafusion_err!("IcebergDvExec payload: {e}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -92,6 +222,42 @@ mod tests {
 
     use super::IcebergPhysicalExtensionCodec;
     use crate::table::expr_adapter::IcebergPhysicalExprAdapterFactory;
+    use std::collections::HashMap;
+
+    use datafusion::execution::TaskContext;
+    use datafusion::physical_plan::collect;
+    use datafusion::physical_plan::execution_plan::reset_plan_states;
+
+    use crate::table::dv_fixture::{dv_entry, dv_exec, int64_values, DvFixture};
+
+    const F1: &str = "data/f1.parquet";
+
+    /// Encode `plan` with the codec and decode it over its own children, the
+    /// way the proto converter calls the codec (children are decoded first).
+    /// The children's execution state is reset, as decoding builds fresh ones:
+    /// a `DataSourceExec` hands its files out once per state.
+    fn reencode(
+        plan: Arc<dyn ExecutionPlan>,
+        ctx: &TaskContext,
+    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+        let mut buf = Vec::new();
+        IcebergPhysicalExtensionCodec.try_encode(
+            plan.clone(),
+            &mut buf,
+            &DefaultPhysicalProtoConverter {},
+        )?;
+        let inputs = plan
+            .children()
+            .into_iter()
+            .map(|child| reset_plan_states(Arc::clone(child)))
+            .collect::<datafusion::common::Result<Vec<_>>>()?;
+        IcebergPhysicalExtensionCodec.try_decode(
+            &buf,
+            &inputs,
+            ctx,
+            &DefaultPhysicalProtoConverter {},
+        )
+    }
 
     #[test]
     fn field_id_adapter_round_trips() {
@@ -144,5 +310,77 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, DataFusionError::NotImplemented(_)), "{err}");
         assert!(err.to_string().contains("EmptyExec"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn dv_exec_round_trips_and_deletes_by_position() {
+        let fixture = DvFixture::new(&[(F1, &[0, 10, 20, 30, 40, 50, 60, 70])]).await;
+        let plan = dv_exec(
+            fixture.scan(vec![fixture.file(F1)], None).await,
+            HashMap::from([dv_entry(F1, &[1, 5])]),
+            true,
+        );
+        let task_ctx = fixture.ctx.task_ctx();
+        let decoded = reencode(plan.clone(), &task_ctx).unwrap();
+        assert_eq!(decoded.schema(), plan.schema());
+
+        let here = int64_values(&collect(plan, task_ctx.clone()).await.unwrap(), "v");
+        let shipped = int64_values(&collect(decoded, task_ctx).await.unwrap(), "v");
+        assert_eq!(here, vec![0, 20, 30, 40, 60, 70]);
+        assert_eq!(shipped, here);
+    }
+
+    /// A user who opted in to `__data_file_path` keeps it after decoding.
+    #[tokio::test]
+    async fn dv_exec_keeps_the_path_column_when_not_stripped() {
+        let fixture = DvFixture::new(&[(F1, &[0, 10, 20, 30])]).await;
+        let plan = dv_exec(
+            fixture.scan(vec![fixture.file(F1)], None).await,
+            HashMap::from([dv_entry(F1, &[0])]),
+            false,
+        );
+        let decoded = reencode(plan.clone(), &fixture.ctx.task_ctx()).unwrap();
+        assert_eq!(decoded.schema().fields().len(), 2, "v and the path column");
+        assert_eq!(decoded.schema(), plan.schema());
+    }
+
+    #[tokio::test]
+    async fn malformed_dv_exec_payloads_are_rejected() {
+        let fixture = DvFixture::new(&[(F1, &[0, 10, 20, 30])]).await;
+        let child = fixture.scan(vec![fixture.file(F1)], None).await;
+        let plan = dv_exec(child.clone(), HashMap::from([dv_entry(F1, &[0])]), true);
+        let mut buf = Vec::new();
+        IcebergPhysicalExtensionCodec
+            .try_encode(plan, &mut buf, &DefaultPhysicalProtoConverter {})
+            .unwrap();
+
+        let task_ctx = fixture.ctx.task_ctx();
+        let decode = |payload: &[u8], inputs: &[Arc<dyn ExecutionPlan>]| {
+            IcebergPhysicalExtensionCodec.try_decode(
+                payload,
+                inputs,
+                &task_ctx,
+                &DefaultPhysicalProtoConverter {},
+            )
+        };
+        let one_input = std::slice::from_ref(&child);
+        assert!(decode(&buf, one_input).is_ok(), "the valid payload");
+        assert!(decode(&buf, &[]).is_err(), "no input");
+        assert!(
+            decode(&buf, &[child.clone(), child.clone()]).is_err(),
+            "two inputs"
+        );
+        assert!(
+            decode(&buf[..buf.len() - 1], one_input).is_err(),
+            "truncated"
+        );
+        let mut trailing = buf.clone();
+        trailing.push(0);
+        assert!(decode(&trailing, one_input).is_err(), "trailing bytes");
+        assert!(
+            decode(b"datafusion_iceberg/dv-exec/v2", one_input).is_err(),
+            "other version"
+        );
+        assert!(decode(b"", &[child]).is_err(), "empty");
     }
 }

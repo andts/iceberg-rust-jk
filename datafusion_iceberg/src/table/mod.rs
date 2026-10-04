@@ -2,7 +2,9 @@
  * Tableprovider to use iceberg table with datafusion.
 */
 
-mod dv_exec;
+pub(crate) mod dv_exec;
+#[cfg(test)]
+pub(crate) mod dv_fixture;
 pub(crate) mod expr_adapter;
 
 use async_trait::async_trait;
@@ -2038,171 +2040,47 @@ mod tests {
     /// filter deletes by those true positions and strips the internal columns.
     #[tokio::test]
     async fn row_number_virtual_column_drives_dv_filter_with_pushdown() {
-        use datafusion::arrow::array::{Int64Array, RecordBatch};
-        use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
-        use datafusion::datasource::file_format::{parquet::ParquetFormat, FileFormat};
-        use datafusion::datasource::listing::PartitionedFile;
-        use datafusion::datasource::physical_plan::{
-            parquet::source::ParquetSource, FileGroup, FileScanConfigBuilder,
-        };
-        use datafusion::datasource::table_schema::TableSchema;
-        use datafusion::logical_expr::Operator;
-        use datafusion::parquet::arrow::{ArrowWriter, RowNumber};
-        use datafusion::parquet::file::properties::WriterProperties;
-        use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
-        use datafusion::physical_plan::{collect, PhysicalExpr};
-        use iceberg_rust::spec::{deletion_vector::DeletionVector, util};
-        use object_store::{memory::InMemory, path::Path as ObjPath, ObjectStoreExt, PutPayload};
-        use roaring::RoaringTreemap;
+        use datafusion::physical_plan::collect;
         use std::collections::HashMap;
 
-        use super::{dv_exec, DATA_FILE_PATH_COLUMN, ROW_NUMBER_COLUMN};
+        use super::dv_fixture::{dv_entry, dv_exec, int64_values, v_at_least, DvFixture};
+        use super::ROW_NUMBER_COLUMN;
 
-        // A single data file with 8 rows; row numbers are 0..8.
-        let file_schema = Arc::new(ArrowSchema::new(vec![Field::new(
-            "v",
-            DataType::Int64,
-            false,
-        )]));
-        let batch = RecordBatch::try_new(
-            file_schema.clone(),
-            vec![Arc::new(Int64Array::from(vec![
-                0i64, 10, 20, 30, 40, 50, 60, 70,
-            ]))],
-        )
-        .unwrap();
-        // Two row groups of 4 rows each so a predicate can prune the first one
-        // by statistics, forcing the surviving rows to carry non-zero-based row
-        // numbers.
-        let mut buf: Vec<u8> = Vec::new();
-        {
-            let props = WriterProperties::builder()
-                .set_max_row_group_row_count(Some(4))
-                .build();
-            let mut writer =
-                ArrowWriter::try_new(&mut buf, file_schema.clone(), Some(props)).unwrap();
-            writer.write(&batch).unwrap();
-            writer.close().unwrap();
-        }
-        let size = buf.len() as u64;
+        // One data file of 8 rows in two row groups of 4; row numbers 0..8.
         let data_path = "data/f1.parquet";
+        let fixture = DvFixture::new(&[(data_path, &[0, 10, 20, 30, 40, 50, 60, 70])]).await;
+        let task_ctx = fixture.ctx.task_ctx();
 
-        let store = Arc::new(InMemory::new());
-        store
-            .put(&ObjPath::from(data_path), PutPayload::from(buf))
-            .await
-            .unwrap();
-
-        let object_store_url = object_store_url_for_location("memory:///dv_row_number");
-        let ctx = SessionContext::new();
-        ctx.runtime_env()
-            .register_object_store(object_store_url.as_ref(), store);
-
-        // Builds a fresh scan plan configured exactly as the DV path does:
-        // file cols + `__data_file_path` partition col + row-number virtual col
-        // (index 2), with `v >= 40` pushed into the reader so the first row
-        // group (values 0..30) is pruned by statistics and only positions 4..8
-        // survive — carrying their true row numbers.
-        let build_scan = || async {
-            let table_schema = TableSchema::builder(file_schema.clone())
-                .with_table_partition_cols(vec![Arc::new(Field::new(
-                    DATA_FILE_PATH_COLUMN,
-                    DataType::Utf8,
-                    false,
-                ))])
-                .with_virtual_columns(vec![Arc::new(
-                    Field::new(ROW_NUMBER_COLUMN, DataType::Int64, false)
-                        .with_extension_type(RowNumber),
-                )])
-                .build();
-            let predicate: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
-                Arc::new(Column::new("v", 0)),
-                Operator::GtEq,
-                Arc::new(Literal::new(ScalarValue::Int64(Some(40)))),
-            ));
-            let source = ParquetSource::new(table_schema)
-                .with_predicate(predicate)
-                .with_pushdown_filters(true);
-            let mut file = PartitionedFile::new(data_path.to_string(), size);
-            file.partition_values = vec![ScalarValue::Utf8(Some(data_path.to_string()))];
-            let file_scan_config =
-                FileScanConfigBuilder::new(object_store_url.clone(), Arc::new(source))
-                    .with_file_group(FileGroup::new(vec![file]))
-                    .with_projection_indices(Some(vec![0usize, 1, 2]))
-                    .unwrap()
-                    .build();
-            ParquetFormat::default()
-                .create_physical_plan(&ctx.state(), file_scan_config)
-                .await
-                .unwrap()
-        };
-
-        // (a) The raw scan emits the surviving rows with their TRUE row numbers.
-        let task_ctx = ctx.task_ctx();
-        let raw = collect(build_scan().await, task_ctx.clone()).await.unwrap();
-        let row_number_idx = raw[0].schema().index_of(ROW_NUMBER_COLUMN).unwrap();
-        let v: Vec<i64> = raw
-            .iter()
-            .flat_map(|b| {
-                b.column(0)
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
-                    .iter()
-                    .map(|x| x.unwrap())
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        let positions: Vec<i64> = raw
-            .iter()
-            .flat_map(|b| {
-                b.column(row_number_idx)
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
-                    .iter()
-                    .map(|x| x.unwrap())
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        assert_eq!(v, vec![40, 50, 60, 70]);
+        // (a) `v >= 40` is pushed into the reader, so the first row group
+        // (values 0..30) is pruned by statistics and only positions 4..8
+        // survive, carrying their TRUE row numbers.
+        let raw = collect(
+            fixture
+                .scan(vec![fixture.file(data_path)], Some(v_at_least(40)))
+                .await,
+            task_ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(int64_values(&raw, "v"), vec![40, 50, 60, 70]);
         assert_eq!(
-            positions,
+            int64_values(&raw, ROW_NUMBER_COLUMN),
             vec![4, 5, 6, 7],
             "row numbers must be the true file positions after the first row group is pruned"
         );
 
         // (b) The DV deletes absolute position 5 (value 50). The internal
         // columns are stripped, leaving just `v`.
-        let mut dvs = HashMap::new();
-        let mut tm = RoaringTreemap::new();
-        tm.insert(5);
-        dvs.insert(util::strip_prefix(data_path), DeletionVector::from(tm));
-        let dv_plan = Arc::new(
-            dv_exec::IcebergDvExec::try_new(
-                build_scan().await,
-                Arc::new(dvs),
-                DATA_FILE_PATH_COLUMN,
-                ROW_NUMBER_COLUMN,
-                /* strip_path_col */ true,
-            )
-            .unwrap(),
+        let dv_plan = dv_exec(
+            fixture
+                .scan(vec![fixture.file(data_path)], Some(v_at_least(40)))
+                .await,
+            HashMap::from([dv_entry(data_path, &[5])]),
+            true,
         );
         let filtered = collect(dv_plan, task_ctx).await.unwrap();
         assert_eq!(filtered[0].num_columns(), 1, "internal columns stripped");
-        let kept: Vec<i64> = filtered
-            .iter()
-            .flat_map(|b| {
-                b.column(0)
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
-                    .iter()
-                    .map(|x| x.unwrap())
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        assert_eq!(kept, vec![40, 60, 70]);
+        assert_eq!(int64_values(&filtered, "v"), vec![40, 60, 70]);
     }
 
     #[tokio::test]

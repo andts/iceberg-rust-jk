@@ -144,6 +144,31 @@ impl IcebergDvExec {
     }
 }
 
+/// What `IcebergPhysicalExtensionCodec` needs to serialize this node; every
+/// other field is derived again by `try_new` on decode.
+#[cfg(feature = "proto")]
+impl IcebergDvExec {
+    pub(crate) fn dvs(&self) -> &HashMap<String, DeletionVector> {
+        &self.dvs
+    }
+
+    pub(crate) fn path_column_name(&self) -> String {
+        self.input.schema().field(self.path_col_idx).name().clone()
+    }
+
+    pub(crate) fn row_number_column_name(&self) -> String {
+        self.input
+            .schema()
+            .field(self.row_number_col_idx)
+            .name()
+            .clone()
+    }
+
+    pub(crate) fn strip_path_col(&self) -> bool {
+        self.strip_path_col
+    }
+}
+
 impl DisplayAs for IcebergDvExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
