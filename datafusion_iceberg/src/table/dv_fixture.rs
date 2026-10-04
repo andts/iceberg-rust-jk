@@ -36,6 +36,9 @@ const ROWS_PER_ROW_GROUP: usize = 4;
 
 pub(crate) struct DvFixture {
     pub(crate) ctx: SessionContext,
+    /// The store, for executor sessions in the codec tests.
+    #[cfg(feature = "proto")]
+    pub(crate) store: Arc<InMemory>,
     pub(crate) url: ObjectStoreUrl,
     file_schema: SchemaRef,
     files: HashMap<String, Vec<u8>>,
@@ -70,9 +73,12 @@ impl DvFixture {
         }
         let url = object_store_url_for_location("memory:///dv_fixture");
         let ctx = SessionContext::new();
-        ctx.runtime_env().register_object_store(url.as_ref(), store);
+        ctx.runtime_env()
+            .register_object_store(url.as_ref(), store.clone());
         Self {
             ctx,
+            #[cfg(feature = "proto")]
+            store,
             url,
             file_schema,
             files: written,

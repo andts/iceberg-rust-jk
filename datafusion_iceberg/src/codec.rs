@@ -280,6 +280,12 @@ mod tests {
 
     use crate::table::dv_exec::IcebergDvExec;
     use crate::table::dv_fixture::{dv_entry, dv_exec, int64_values, DvFixture};
+    use datafusion::prelude::SessionContext;
+    use datafusion_proto::bytes::{
+        physical_plan_from_bytes_with_extension_codec, physical_plan_to_bytes_with_extension_codec,
+    };
+
+    use crate::table::dv_fixture::v_at_least;
     use datafusion::common::ScalarValue;
 
     const F1: &str = "data/f1.parquet";
@@ -525,5 +531,73 @@ mod tests {
             shipped_dv_paths(task, &fixture.ctx.task_ctx()),
             vec![format!("/{F1}")]
         );
+    }
+
+    /// Ship `plan` through datafusion-proto to an executor session that has
+    /// only the fixture's store, and execute it there.
+    async fn execute_shipped(fixture: &DvFixture, plan: Arc<dyn ExecutionPlan>) -> Vec<i64> {
+        let bytes =
+            physical_plan_to_bytes_with_extension_codec(plan, &IcebergPhysicalExtensionCodec)
+                .unwrap();
+        let executor = SessionContext::new();
+        executor
+            .runtime_env()
+            .register_object_store(fixture.url.as_ref(), fixture.store.clone());
+        let decoded = physical_plan_from_bytes_with_extension_codec(
+            &bytes,
+            &executor.task_ctx(),
+            &IcebergPhysicalExtensionCodec,
+        )
+        .unwrap();
+        int64_values(&collect(decoded, executor.task_ctx()).await.unwrap(), "v")
+    }
+
+    /// Stands in for v3 deletion vectors: once loaded, they are the same map.
+    #[tokio::test]
+    async fn dv_exec_ships_with_predicate_pushdown() {
+        let fixture = DvFixture::new(&[(F1, &[0, 10, 20, 30, 40, 50, 60, 70])]).await;
+        let plan = dv_exec(
+            fixture
+                .scan(vec![fixture.file(F1)], Some(v_at_least(40)))
+                .await,
+            HashMap::from([dv_entry(F1, &[5])]),
+            true,
+        );
+        assert_eq!(execute_shipped(&fixture, plan).await, vec![40, 60, 70]);
+    }
+
+    /// One file split by byte range into two tasks, each shipped on its own:
+    /// both apply deletes by absolute position, and together they return what
+    /// one process does.
+    #[tokio::test]
+    async fn split_file_tasks_delete_by_absolute_position() {
+        let fixture = DvFixture::new(&[(F1, &[0, 10, 20, 30, 40, 50, 60, 70])]).await;
+        let dvs = HashMap::from([dv_entry(F1, &[1, 5])]);
+        let (head, tail) = fixture.split_at_second_row_group(F1);
+
+        let head_rows = execute_shipped(
+            &fixture,
+            dv_exec(fixture.scan(vec![head], None).await, dvs.clone(), true),
+        )
+        .await;
+        let tail_rows = execute_shipped(
+            &fixture,
+            dv_exec(fixture.scan(vec![tail], None).await, dvs.clone(), true),
+        )
+        .await;
+        assert_eq!(
+            head_rows,
+            vec![0, 20, 30],
+            "row group 0, position 1 deleted"
+        );
+        assert_eq!(
+            tail_rows,
+            vec![40, 60, 70],
+            "row group 1, absolute position 5 deleted"
+        );
+
+        let whole = dv_exec(fixture.scan(vec![fixture.file(F1)], None).await, dvs, true);
+        let here = int64_values(&collect(whole, fixture.ctx.task_ctx()).await.unwrap(), "v");
+        assert_eq!([head_rows, tail_rows].concat(), here);
     }
 }
