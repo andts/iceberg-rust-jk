@@ -44,6 +44,23 @@ async fn run_query(query: &str, ctx: &SessionContext) -> Vec<RecordBatch> {
         .expect("query execution failed")
 }
 
+#[cfg(feature = "proto")]
+async fn plan_does_not_serialize(query: &str, ctx: &SessionContext) {
+    use datafusion_iceberg::IcebergPhysicalExtensionCodec;
+    use datafusion_proto::bytes::physical_plan_to_bytes_with_extension_codec;
+
+    let plan = ctx
+        .sql(query)
+        .await
+        .expect("query planning failed")
+        .create_physical_plan()
+        .await
+        .expect("physical planning failed");
+    let err = physical_plan_to_bytes_with_extension_codec(plan, &IcebergPhysicalExtensionCodec)
+        .expect_err("plans with position deletes cannot be serialized yet");
+    assert!(err.to_string().contains("IcebergDvExec"), "{err}");
+}
+
 fn write_position_delete_file(
     path: &str,
     data_file_path: &str,
@@ -251,6 +268,11 @@ async fn applies_v2_position_deletes() {
         .commit()
         .await
         .unwrap();
+
+    // v2 position deletes are applied by `IcebergDvExec`, which nothing can
+    // serialize yet: shipping this plan must fail, naming the node.
+    #[cfg(feature = "proto")]
+    plan_does_not_serialize("SELECT id, payload FROM warehouse.test.orders", &ctx).await;
 
     let batches = run_query(
         "SELECT id, payload FROM warehouse.test.orders ORDER BY id",

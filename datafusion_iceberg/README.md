@@ -24,5 +24,6 @@ ctx.runtime_env().register_object_store(
 );
 ```
 
-Plans that contain deletion-vector scans, `INSERT`s, or materialized-view refreshes
-can't be serialized yet. Serialization fails, naming the node.
+Plans that scan tables with position-delete files (v2) or deletion vectors (v3),
+`INSERT`s, and materialized-view refreshes can't be serialized yet. Serialization
+fails instead (for scans with deletes, the error names `IcebergDvExec`).

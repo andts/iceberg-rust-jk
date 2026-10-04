@@ -209,9 +209,11 @@ contract).
 
 ## Out of scope (follow-ups)
 
-- **`IcebergDvExec`** (deletion vectors, `table/dv_exec.rs`) is a custom
-  `ExecutionPlan` with no serialization. Plans scanning tables with deletion vectors
-  still cannot be shipped. The same codec is the natural home for it
+- **`IcebergDvExec`** (`table/dv_exec.rs`) is a custom `ExecutionPlan` with no
+  serialization. It applies both v3 deletion vectors and v2 position-delete files
+  (`table_scan` routes both into `dv_index`), so plans scanning tables with either
+  still cannot be shipped — this includes common Spark/Flink merge-on-read v2
+  tables. The same codec is the natural home for it
   (`try_encode` / `try_decode`, payload = path-keyed deletion vectors plus column
   indices); left out to keep this change focused.
 - **`IcebergDataSink`** (`INSERT` plans, `table/mod.rs`) and **`PhysicalForkNode`**
