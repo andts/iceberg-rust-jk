@@ -343,6 +343,28 @@ async fn applies_v2_position_deletes() {
         &batches
     );
 
+    // Shipped to an executor, the plan applies the same deletes. The table's
+    // paths are absolute (`/tmp/...`) and map keys are normalized, so this also
+    // checks that pruning normalizes the way IcebergDvExec looks up.
+    #[cfg(feature = "proto")]
+    assert_batches_eq!(
+        [
+            "+----+---------+",
+            "| id | payload |",
+            "+----+---------+",
+            "| 1  | one     |",
+            "| 3  | three   |",
+            "| 4  | four    |",
+            "+----+---------+",
+        ],
+        &shipping::execute_shipped(
+            &ctx,
+            "SELECT id, payload FROM warehouse.test.orders ORDER BY id",
+            &table_dir,
+        )
+        .await
+    );
+
     let batches = run_query(
         "SELECT __iceberg_data_sequence_number, id, __data_file_path,
                 __iceberg_file_row_position
