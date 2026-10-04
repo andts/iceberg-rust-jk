@@ -26,6 +26,9 @@ use object_store::local::LocalFileSystem;
 use std::sync::Arc;
 use tempfile::TempDir;
 
+#[cfg(feature = "proto")]
+mod shipping;
+
 async fn run_query(query: &str, ctx: &SessionContext) -> Vec<RecordBatch> {
     ctx.sql(query)
         .await
@@ -219,6 +222,19 @@ pub async fn test_equality_delete() {
         "+----+-------------+------------+------------+--------+",
     ];
     assert_batches_eq!(expected, &batches);
+
+    // Equality deletes are applied by an anti-join of standard DataFusion
+    // nodes, so the plan ships without any Iceberg-specific node encoding.
+    #[cfg(feature = "proto")]
+    assert_batches_eq!(
+        expected,
+        &shipping::execute_shipped(
+            &ctx,
+            "select * from warehouse.test.orders order by id",
+            &table_dir,
+        )
+        .await
+    );
 
     let conn = Connection::open_in_memory().unwrap();
     conn.execute("install iceberg", []).unwrap();
