@@ -62,7 +62,8 @@ The payload is a small, explicit, big-endian binary layout, so no new dependency
 needed:
 
 ```text
-tag                 b"datafusion_iceberg/dv-exec/v1"
+tag                 b"datafusion_iceberg/dv-exec/v1\0"   // NUL-terminated: a later
+                                                      // tag starting with this one is foreign
 u32 + utf8          path column name
 u32 + utf8          row-number column name
 u8                  strip_path_col (0/1)
@@ -94,8 +95,9 @@ codec encodes only the map entries those files need:
    exact string `IcebergDvExec` sees at execution.
 2. Normalize each value with `util::strip_prefix`, the same call `IcebergDvExec` makes
    at lookup (`dv_exec.rs:324`), and keep only matching map entries.
-3. If the walk finds no `FileScanConfig` (an unexpected child shape), encode the full
-   map. That's correct, just larger.
+3. If the walk finds no `FileScanConfig`, or finds a leaf that is not one (e.g. an
+   engine's stage reader, whose files are unknown), encode the full map. That's
+   correct, just larger.
 
 Without pruning every task would receive the whole table's deletes; with it, total
 bytes shipped stay roughly equal to the deletes being applied. When two tasks split

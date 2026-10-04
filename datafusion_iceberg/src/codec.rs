@@ -28,7 +28,9 @@ const FIELD_ID_ADAPTER_V1: &[u8] = b"datafusion_iceberg/field-id-adapter/v1";
 /// strip flag (`u8`), entry count (`u32`), then per entry the normalized
 /// data-file path and its `deletion-vector-v1` blob (each `u32` length +
 /// bytes), sorted by path.
-const DV_EXEC_V1: &[u8] = b"datafusion_iceberg/dv-exec/v1";
+// The NUL ends the tag, so a later tag that starts with this one (`v10`,
+// `v1-lazy`) is foreign rather than a malformed v1 payload.
+const DV_EXEC_V1: &[u8] = b"datafusion_iceberg/dv-exec/v1\0";
 
 /// Serializes the parts of `datafusion_iceberg` physical plans that
 /// `datafusion-proto` cannot: currently the field-id expression adapter attached
@@ -150,6 +152,11 @@ fn scanned_data_files(plan: &Arc<dyn ExecutionPlan>, path_column: &str) -> Optio
             .downcast_ref::<DataSourceExec>()
             .and_then(|exec| exec.data_source().downcast_ref::<FileScanConfig>())
         else {
+            // Any other leaf (e.g. an engine's stage reader) produces rows of
+            // files we can't name, so nothing may be pruned.
+            if node.children().is_empty() {
+                complete = false;
+            }
             return Ok(TreeNodeRecursion::Continue);
         };
         found_scan = true;
@@ -599,5 +606,48 @@ mod tests {
         let whole = dv_exec(fixture.scan(vec![fixture.file(F1)], None).await, dvs, true);
         let here = int64_values(&collect(whole, fixture.ctx.task_ctx()).await.unwrap(), "v");
         assert_eq!([head_rows, tail_rows].concat(), here);
+    }
+
+    /// A tag that merely starts with the v1 tag (a later version) is foreign,
+    /// not a v1 payload with odd contents.
+    #[tokio::test]
+    async fn later_dv_exec_versions_are_unknown_not_malformed_v1() {
+        let fixture = DvFixture::new(&[(F1, &[0, 10, 20, 30])]).await;
+        let child = fixture.scan(vec![fixture.file(F1)], None).await;
+        let err = IcebergPhysicalExtensionCodec
+            .try_decode(
+                b"datafusion_iceberg/dv-exec/v1-lazy\0payload",
+                std::slice::from_ref(&child),
+                &fixture.ctx.task_ctx(),
+                &DefaultPhysicalProtoConverter {},
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown datafusion_iceberg plan payload"),
+            "{err}"
+        );
+    }
+
+    /// Rows may reach `IcebergDvExec` from a leaf that is not a file scan
+    /// (e.g. an engine's stage reader next to a local scan); their files are
+    /// unknown, so nothing may be pruned.
+    #[tokio::test]
+    async fn a_leaf_other_than_a_file_scan_ships_every_delete() {
+        use datafusion::physical_plan::union::UnionExec;
+
+        let fixture = DvFixture::new(&[(F1, &[0, 10, 20, 30])]).await;
+        let scan = fixture.scan(vec![fixture.file(F1)], None).await;
+        let other_leaf: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(scan.schema()));
+        let union = UnionExec::try_new(vec![scan, other_leaf]).unwrap();
+        let task = dv_exec(
+            union,
+            HashMap::from([dv_entry(F1, &[0]), dv_entry(F2, &[0])]),
+            true,
+        );
+        assert_eq!(
+            shipped_dv_paths(task, &fixture.ctx.task_ctx()),
+            vec![F1, F2]
+        );
     }
 }
