@@ -148,6 +148,10 @@ impl IcebergDvExec {
 /// other field is derived again by `try_new` on decode.
 #[cfg(feature = "proto")]
 impl IcebergDvExec {
+    pub(crate) fn input(&self) -> &Arc<dyn ExecutionPlan> {
+        &self.input
+    }
+
     pub(crate) fn dvs(&self) -> &HashMap<String, DeletionVector> {
         &self.dvs
     }

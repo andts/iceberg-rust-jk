@@ -16,6 +16,8 @@ use datafusion::datasource::table_schema::TableSchema;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::logical_expr::Operator;
 use datafusion::parquet::arrow::{ArrowWriter, RowNumber};
+#[cfg(feature = "proto")]
+use datafusion::parquet::file::metadata::ParquetMetaDataReader;
 use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
 use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
@@ -83,6 +85,32 @@ impl DvFixture {
         let mut file = PartitionedFile::new(path.to_string(), self.files[path].len() as u64);
         file.partition_values = vec![ScalarValue::Utf8(Some(path.to_string()))];
         file
+    }
+
+    /// `path` split into two byte ranges at the start of its second row group:
+    /// the first range reads row group 0, the second reads the rest, starting
+    /// at absolute row `ROWS_PER_ROW_GROUP`. Only the codec tests split files.
+    #[cfg(feature = "proto")]
+    pub(crate) fn split_at_second_row_group(
+        &self,
+        path: &str,
+    ) -> (PartitionedFile, PartitionedFile) {
+        let bytes = bytes::Bytes::from(self.files[path].clone());
+        let metadata = ParquetMetaDataReader::new()
+            .parse_and_finish(&bytes)
+            .unwrap();
+        // DataFusion assigns a row group to the range containing its first
+        // column chunk's start offset.
+        let column = metadata.row_group(1).column(0);
+        let split = column
+            .dictionary_page_offset()
+            .unwrap_or_else(|| column.data_page_offset());
+        let whole = self.file(path);
+        let size = whole.object_meta.size as i64;
+        (
+            whole.clone().with_range(0, split),
+            whole.with_range(split, size),
+        )
     }
 
     /// A Parquet scan of `files` in one file group, configured as `table_scan`

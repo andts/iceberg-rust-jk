@@ -1,14 +1,19 @@
 //! `PhysicalExtensionCodec` for plans produced by this crate.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
+use datafusion::common::ScalarValue;
 use datafusion::common::{internal_datafusion_err, internal_err, not_impl_err, Result};
+use datafusion::datasource::physical_plan::FileScanConfig;
+use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr_adapter::PhysicalExprAdapterFactory;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_proto::physical_plan::{PhysicalExtensionCodec, PhysicalProtoConverterExtension};
 use iceberg_rust::spec::deletion_vector::DeletionVector;
+use iceberg_rust::spec::util;
 
 use crate::table::dv_exec::IcebergDvExec;
 use crate::table::expr_adapter::IcebergPhysicalExprAdapterFactory;
@@ -118,11 +123,56 @@ fn encode_dv_exec(exec: &IcebergDvExec, buf: &mut Vec<u8>) -> Result<()> {
     Ok(())
 }
 
-/// The deletion vectors `exec` ships, sorted by path.
+/// The deletion vectors `exec` ships, sorted by path: those of the data files
+/// its child scans. An engine that splits a scan into tasks serializes each
+/// task's plan separately, so this keeps the shipped bytes close to the deletes
+/// actually applied. If the scanned files can't be determined, all are shipped.
 fn shipped_entries(exec: &IcebergDvExec) -> Vec<(&String, &DeletionVector)> {
-    let mut entries: Vec<_> = exec.dvs().iter().collect();
+    let scanned = scanned_data_files(exec.input(), &exec.path_column_name());
+    let mut entries: Vec<_> = exec
+        .dvs()
+        .iter()
+        .filter(|(path, _)| scanned.as_ref().is_none_or(|files| files.contains(*path)))
+        .collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
     entries
+}
+
+/// Normalized paths of the data files `plan` scans, read from the
+/// `path_column` partition value of each file and normalized exactly as
+/// `IcebergDvExec` does at lookup. `None` when that can't be determined.
+fn scanned_data_files(plan: &Arc<dyn ExecutionPlan>, path_column: &str) -> Option<HashSet<String>> {
+    let mut files = HashSet::new();
+    let mut found_scan = false;
+    let mut complete = true;
+    plan.apply(|node| {
+        let Some(config) = node
+            .downcast_ref::<DataSourceExec>()
+            .and_then(|exec| exec.data_source().downcast_ref::<FileScanConfig>())
+        else {
+            return Ok(TreeNodeRecursion::Continue);
+        };
+        found_scan = true;
+        let Some(idx) = config
+            .table_partition_cols()
+            .iter()
+            .position(|field| field.name() == path_column)
+        else {
+            complete = false;
+            return Ok(TreeNodeRecursion::Continue);
+        };
+        for file in config.file_groups.iter().flat_map(|group| group.iter()) {
+            match file.partition_values.get(idx) {
+                Some(ScalarValue::Utf8(Some(path))) => {
+                    files.insert(util::strip_prefix(path));
+                }
+                _ => complete = false,
+            }
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })
+    .ok()?;
+    (found_scan && complete).then_some(files)
 }
 
 fn decode_dv_exec(
@@ -228,7 +278,9 @@ mod tests {
     use datafusion::physical_plan::collect;
     use datafusion::physical_plan::execution_plan::reset_plan_states;
 
+    use crate::table::dv_exec::IcebergDvExec;
     use crate::table::dv_fixture::{dv_entry, dv_exec, int64_values, DvFixture};
+    use datafusion::common::ScalarValue;
 
     const F1: &str = "data/f1.parquet";
 
@@ -382,5 +434,96 @@ mod tests {
             "other version"
         );
         assert!(decode(b"", &[child]).is_err(), "empty");
+    }
+
+    const F2: &str = "data/f2.parquet";
+
+    /// The data-file paths whose deletion vectors `plan` ships.
+    fn shipped_dv_paths(plan: Arc<dyn ExecutionPlan>, ctx: &TaskContext) -> Vec<String> {
+        let decoded = reencode(plan, ctx).unwrap();
+        let mut paths: Vec<_> = decoded
+            .downcast_ref::<IcebergDvExec>()
+            .unwrap()
+            .dvs()
+            .keys()
+            .cloned()
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    #[tokio::test]
+    async fn each_task_ships_only_the_deletes_of_its_files() {
+        let fixture = DvFixture::new(&[(F1, &[0, 10, 20, 30]), (F2, &[40, 50, 60, 70])]).await;
+        let dvs = HashMap::from([dv_entry(F1, &[0]), dv_entry(F2, &[1])]);
+        let ctx = fixture.ctx.task_ctx();
+
+        let task1 = dv_exec(
+            fixture.scan(vec![fixture.file(F1)], None).await,
+            dvs.clone(),
+            true,
+        );
+        let task2 = dv_exec(
+            fixture.scan(vec![fixture.file(F2)], None).await,
+            dvs.clone(),
+            true,
+        );
+        let both = dv_exec(
+            fixture
+                .scan(vec![fixture.file(F1), fixture.file(F2)], None)
+                .await,
+            dvs,
+            true,
+        );
+        assert_eq!(shipped_dv_paths(task1, &ctx), vec![F1]);
+        assert_eq!(shipped_dv_paths(task2, &ctx), vec![F2]);
+        assert_eq!(shipped_dv_paths(both, &ctx), vec![F1, F2]);
+    }
+
+    /// Two tasks reading one file by byte range both need its bitmap.
+    #[tokio::test]
+    async fn both_halves_of_a_split_file_ship_its_deletes() {
+        let fixture = DvFixture::new(&[(F1, &[0, 10, 20, 30, 40, 50, 60, 70]), (F2, &[80])]).await;
+        let dvs = HashMap::from([dv_entry(F1, &[1, 5]), dv_entry(F2, &[0])]);
+        let ctx = fixture.ctx.task_ctx();
+        let (head, tail) = fixture.split_at_second_row_group(F1);
+        for half in [head, tail] {
+            let task = dv_exec(fixture.scan(vec![half], None).await, dvs.clone(), true);
+            assert_eq!(shipped_dv_paths(task, &ctx), vec![F1]);
+        }
+    }
+
+    /// When the files can't be determined, shipping everything is correct.
+    #[tokio::test]
+    async fn without_a_file_scan_every_delete_ships() {
+        let fixture = DvFixture::new(&[(F1, &[0, 10, 20, 30])]).await;
+        let schema = fixture.scan(vec![fixture.file(F1)], None).await.schema();
+        let task = dv_exec(
+            Arc::new(EmptyExec::new(schema)),
+            HashMap::from([dv_entry(F1, &[0]), dv_entry(F2, &[0])]),
+            true,
+        );
+        assert_eq!(
+            shipped_dv_paths(task, &fixture.ctx.task_ctx()),
+            vec![F1, F2]
+        );
+    }
+    /// Map keys are normalized (`strip_prefix`); partition values carry the
+    /// path as stored in the manifest, scheme included.
+    #[tokio::test]
+    async fn pruning_normalizes_paths_like_the_lookup() {
+        let fixture = DvFixture::new(&[(F1, &[0, 10, 20, 30])]).await;
+        let stored = format!("s3://bucket/{F1}");
+        let mut file = fixture.file(F1);
+        file.partition_values = vec![ScalarValue::Utf8(Some(stored.clone()))];
+        let task = dv_exec(
+            fixture.scan(vec![file], None).await,
+            HashMap::from([dv_entry(&stored, &[0]), dv_entry(F2, &[0])]),
+            true,
+        );
+        assert_eq!(
+            shipped_dv_paths(task, &fixture.ctx.task_ctx()),
+            vec![format!("/{F1}")]
+        );
     }
 }
