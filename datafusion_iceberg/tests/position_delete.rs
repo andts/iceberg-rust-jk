@@ -32,6 +32,9 @@ use iceberg_sql_catalog::SqlCatalog;
 use object_store::local::LocalFileSystem;
 use tempfile::TempDir;
 
+#[cfg(feature = "proto")]
+mod shipping;
+
 const FILE_PATH_FIELD_ID: i32 = i32::MAX - 101;
 const POS_FIELD_ID: i32 = i32::MAX - 102;
 
@@ -44,21 +47,66 @@ async fn run_query(query: &str, ctx: &SessionContext) -> Vec<RecordBatch> {
         .expect("query execution failed")
 }
 
+/// The scan under `IcebergDvExec` must still emit the Parquet row-number
+/// column after a datafusion-proto round trip, with true file positions:
+/// `IcebergDvExec` deletes by them.
 #[cfg(feature = "proto")]
-async fn plan_does_not_serialize(query: &str, ctx: &SessionContext) {
-    use datafusion_iceberg::IcebergPhysicalExtensionCodec;
-    use datafusion_proto::bytes::physical_plan_to_bytes_with_extension_codec;
+async fn row_number_column_survives_shipping(query: &str, ctx: &SessionContext, location: &str) {
+    use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
+    use datafusion::physical_plan::collect;
 
     let plan = ctx
         .sql(query)
         .await
-        .expect("query planning failed")
+        .unwrap()
         .create_physical_plan()
         .await
-        .expect("physical planning failed");
-    let err = physical_plan_to_bytes_with_extension_codec(plan, &IcebergPhysicalExtensionCodec)
-        .expect_err("plans with position deletes cannot be serialized yet");
-    assert!(err.to_string().contains("IcebergDvExec"), "{err}");
+        .unwrap();
+    let mut scan = None;
+    plan.apply(|node| {
+        if node.name() == "IcebergDvExec" {
+            scan = Some(node.children()[0].clone());
+            return Ok(TreeNodeRecursion::Stop);
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })
+    .unwrap();
+    let scan = scan.expect("position deletes are applied by IcebergDvExec");
+    // The row-number column is the scan's only field with an Arrow extension type.
+    let row_number = scan
+        .schema()
+        .fields()
+        .iter()
+        .find(|field| field.metadata().contains_key("ARROW:extension:name"))
+        .expect("the scan emits the row-number column")
+        .clone();
+
+    let executor = shipping::executor(location);
+    let shipped = shipping::ship(scan, &executor);
+    assert_eq!(
+        shipped
+            .schema()
+            .field_with_name(row_number.name())
+            .expect("the row-number column survives"),
+        row_number.as_ref()
+    );
+    let batches = collect(shipped, executor.task_ctx()).await.unwrap();
+    let mut positions: Vec<i64> = batches
+        .iter()
+        .flat_map(|batch| {
+            batch
+                .column_by_name(row_number.name())
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values()
+                .to_vec()
+        })
+        .collect();
+    positions.sort_unstable();
+    // The test's INSERT writes one data file of six rows.
+    assert_eq!(positions, (0..6).collect::<Vec<i64>>());
 }
 
 fn write_position_delete_file(
@@ -269,10 +317,13 @@ async fn applies_v2_position_deletes() {
         .await
         .unwrap();
 
-    // v2 position deletes are applied by `IcebergDvExec`, which nothing can
-    // serialize yet: shipping this plan must fail, naming the node.
     #[cfg(feature = "proto")]
-    plan_does_not_serialize("SELECT id, payload FROM warehouse.test.orders", &ctx).await;
+    row_number_column_survives_shipping(
+        "SELECT id, payload FROM warehouse.test.orders",
+        &ctx,
+        &table_dir,
+    )
+    .await;
 
     let batches = run_query(
         "SELECT id, payload FROM warehouse.test.orders ORDER BY id",
@@ -290,6 +341,28 @@ async fn applies_v2_position_deletes() {
             "+----+---------+",
         ],
         &batches
+    );
+
+    // Shipped to an executor, the plan applies the same deletes. (The table's
+    // paths have no scheme, so they are unchanged by normalization; pruning's
+    // normalization is covered by `codec::tests`.)
+    #[cfg(feature = "proto")]
+    assert_batches_eq!(
+        [
+            "+----+---------+",
+            "| id | payload |",
+            "+----+---------+",
+            "| 1  | one     |",
+            "| 3  | three   |",
+            "| 4  | four    |",
+            "+----+---------+",
+        ],
+        &shipping::execute_shipped(
+            &ctx,
+            "SELECT id, payload FROM warehouse.test.orders ORDER BY id",
+            &table_dir,
+        )
+        .await
     );
 
     let batches = run_query(
