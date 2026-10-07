@@ -1944,7 +1944,6 @@ dependencies = [
 [[package]]
 name = "datafusion"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "arrow-schema 59.3.0",
@@ -1996,7 +1995,6 @@ dependencies = [
 [[package]]
 name = "datafusion-catalog"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "async-trait",
@@ -2020,7 +2018,6 @@ dependencies = [
 [[package]]
 name = "datafusion-catalog-listing"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "async-trait",
@@ -2043,7 +2040,6 @@ dependencies = [
 [[package]]
 name = "datafusion-common"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "arrow-ipc 59.3.0",
@@ -2069,7 +2065,6 @@ dependencies = [
 [[package]]
 name = "datafusion-common-runtime"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "futures",
  "log",
@@ -2079,7 +2074,6 @@ dependencies = [
 [[package]]
 name = "datafusion-datasource"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "async-compression",
@@ -2095,6 +2089,7 @@ dependencies = [
  "datafusion-physical-expr-adapter",
  "datafusion-physical-expr-common",
  "datafusion-physical-plan",
+ "datafusion-proto-models",
  "datafusion-session",
  "flate2",
  "futures",
@@ -2114,7 +2109,6 @@ dependencies = [
 [[package]]
 name = "datafusion-datasource-arrow"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "arrow-ipc 59.3.0",
@@ -2127,6 +2121,7 @@ dependencies = [
  "datafusion-expr",
  "datafusion-physical-expr-common",
  "datafusion-physical-plan",
+ "datafusion-proto-models",
  "datafusion-session",
  "futures",
  "itertools 0.15.0",
@@ -2137,7 +2132,6 @@ dependencies = [
 [[package]]
 name = "datafusion-datasource-csv"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "async-trait",
@@ -2149,6 +2143,7 @@ dependencies = [
  "datafusion-expr",
  "datafusion-physical-expr-common",
  "datafusion-physical-plan",
+ "datafusion-proto-models",
  "datafusion-session",
  "futures",
  "object_store",
@@ -2159,7 +2154,6 @@ dependencies = [
 [[package]]
 name = "datafusion-datasource-json"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "async-trait",
@@ -2171,6 +2165,7 @@ dependencies = [
  "datafusion-expr",
  "datafusion-physical-expr-common",
  "datafusion-physical-plan",
+ "datafusion-proto-models",
  "datafusion-session",
  "futures",
  "object_store",
@@ -2181,7 +2176,6 @@ dependencies = [
 [[package]]
 name = "datafusion-datasource-parquet"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "arrow-schema 59.3.0",
@@ -2198,6 +2192,7 @@ dependencies = [
  "datafusion-physical-expr-adapter",
  "datafusion-physical-expr-common",
  "datafusion-physical-plan",
+ "datafusion-proto-models",
  "datafusion-pruning",
  "datafusion-session",
  "futures",
@@ -2212,12 +2207,10 @@ dependencies = [
 [[package]]
 name = "datafusion-doc"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 
 [[package]]
 name = "datafusion-execution"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "arrow-buffer 59.3.0",
@@ -2242,7 +2235,6 @@ dependencies = [
 [[package]]
 name = "datafusion-expr"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "arrow-schema 59.3.0",
@@ -2254,6 +2246,8 @@ dependencies = [
  "datafusion-functions-aggregate-common",
  "datafusion-functions-window-common",
  "datafusion-physical-expr-common",
+ "datafusion-proto-common",
+ "datafusion-proto-models",
  "indexmap 2.14.2",
  "itertools 0.15.0",
  "recursive",
@@ -2264,7 +2258,6 @@ dependencies = [
 [[package]]
 name = "datafusion-expr-common"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "datafusion-common",
@@ -2275,7 +2268,6 @@ dependencies = [
 [[package]]
 name = "datafusion-functions"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "arrow-buffer 59.3.0",
@@ -2306,7 +2298,6 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-aggregate"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "datafusion-common",
@@ -2326,7 +2317,6 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-aggregate-common"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "datafusion-common",
@@ -2337,7 +2327,6 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-nested"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "arrow-ord 59.3.0",
@@ -2361,7 +2350,6 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-table"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "async-trait",
@@ -2376,7 +2364,6 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-window"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "datafusion-common",
@@ -2392,7 +2379,6 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-window-common"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "datafusion-common",
  "datafusion-physical-expr-common",
@@ -2415,7 +2401,6 @@ dependencies = [
 [[package]]
 name = "datafusion-macros"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "datafusion-doc",
  "quote",
@@ -2425,7 +2410,6 @@ dependencies = [
 [[package]]
 name = "datafusion-optimizer"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "chrono",
@@ -2444,7 +2428,6 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-expr"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "arrow-schema 59.3.0",
@@ -2453,6 +2436,7 @@ dependencies = [
  "datafusion-expr-common",
  "datafusion-functions-aggregate-common",
  "datafusion-physical-expr-common",
+ "datafusion-proto-models",
  "half",
  "hashbrown 0.17.1",
  "indexmap 2.14.2",
@@ -2466,7 +2450,6 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-expr-adapter"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "datafusion-common",
@@ -2480,12 +2463,12 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-expr-common"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "chrono",
  "datafusion-common",
  "datafusion-expr-common",
+ "datafusion-proto-models",
  "hashbrown 0.17.1",
  "indexmap 2.14.2",
  "itertools 0.15.0",
@@ -2496,7 +2479,6 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-optimizer"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "datafusion-common",
@@ -2515,7 +2497,6 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-plan"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "arrow-data 59.3.0",
@@ -2532,7 +2513,10 @@ dependencies = [
  "datafusion-functions-aggregate-common",
  "datafusion-functions-window-common",
  "datafusion-physical-expr",
+ "datafusion-physical-expr-adapter",
  "datafusion-physical-expr-common",
+ "datafusion-proto-common",
+ "datafusion-proto-models",
  "futures",
  "half",
  "hashbrown 0.17.1",
@@ -2547,9 +2531,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "datafusion-proto"
+version = "55.1.0"
+dependencies = [
+ "arrow 59.3.0",
+ "datafusion-catalog",
+ "datafusion-catalog-listing",
+ "datafusion-common",
+ "datafusion-datasource",
+ "datafusion-datasource-arrow",
+ "datafusion-datasource-csv",
+ "datafusion-datasource-json",
+ "datafusion-datasource-parquet",
+ "datafusion-execution",
+ "datafusion-expr",
+ "datafusion-functions-table",
+ "datafusion-physical-expr",
+ "datafusion-physical-expr-adapter",
+ "datafusion-physical-expr-common",
+ "datafusion-physical-plan",
+ "datafusion-proto-common",
+ "datafusion-proto-models",
+ "object_store",
+ "prost",
+]
+
+[[package]]
+name = "datafusion-proto-common"
+version = "55.1.0"
+dependencies = [
+ "arrow 59.3.0",
+ "datafusion-common",
+ "prost",
+]
+
+[[package]]
+name = "datafusion-proto-models"
+version = "55.1.0"
+dependencies = [
+ "datafusion-common",
+ "datafusion-proto-common",
+ "prost",
+]
+
+[[package]]
 name = "datafusion-pruning"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "datafusion-common",
@@ -2564,7 +2591,6 @@ dependencies = [
 [[package]]
 name = "datafusion-session"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow-schema 59.3.0",
  "async-trait",
@@ -2578,7 +2604,6 @@ dependencies = [
 [[package]]
 name = "datafusion-sql"
 version = "55.1.0"
-source = "git+https://github.com/andts/datafusion.git?rev=fb722c227a3e5c22af3e140a418977c3df9c853d#fb722c227a3e5c22af3e140a418977c3df9c853d"
 dependencies = [
  "arrow 59.3.0",
  "bigdecimal",
@@ -2605,6 +2630,7 @@ dependencies = [
  "dashmap",
  "datafusion",
  "datafusion-expr",
+ "datafusion-proto",
  "derive_builder",
  "duckdb",
  "futures",
